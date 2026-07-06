@@ -3,25 +3,69 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace IconShift;
 
 public partial class MainForm : Form
 {
+    private ComboBox comboBox1;
+    private ComboBox comboBox2;
+    private Button btnOpenFolder1;
+    private Button btnOpenFolder2;
+    private Label lblCount1;
+    private Label lblCount2;
     private ListView listView1;
     private ImageList imageList1;
     private ListView listView2;
     private ImageList imageList2;
+    private FileSystemWatcher desktopWatcher;
+    private FileSystemWatcher commonDesktopWatcher;
 
     public MainForm()
     {
         InitializeComponent();
+        InitializeFileSystemWatchers();
         LoadDesktopFiles();
         LoadCommonDesktopFiles();
     }
 
     private void InitializeComponent()
     {
+        // Настройка ComboBox для первой панели
+        comboBox1 = new ComboBox();
+        comboBox1.DropDownStyle = ComboBoxStyle.DropDownList;
+        comboBox1.SelectedIndexChanged += ComboBox1_SelectedIndexChanged;
+
+        // Настройка кнопки открытия папки для первой панели
+        btnOpenFolder1 = new Button();
+        btnOpenFolder1.Text = "📁";
+        btnOpenFolder1.Width = 35;
+        btnOpenFolder1.Click += BtnOpenFolder1_Click;
+
+        // Настройка ComboBox для второй панели
+        comboBox2 = new ComboBox();
+        comboBox2.DropDownStyle = ComboBoxStyle.DropDownList;
+        comboBox2.SelectedIndexChanged += ComboBox2_SelectedIndexChanged;
+
+        // Настройка кнопки открытия папки для второй панели
+        btnOpenFolder2 = new Button();
+        btnOpenFolder2.Text = "📁";
+        btnOpenFolder2.Width = 35;
+        btnOpenFolder2.Click += BtnOpenFolder2_Click;
+
+        // Настройка Label для счётчика первой панели
+        lblCount1 = new Label();
+        lblCount1.AutoSize = false;
+        lblCount1.TextAlign = ContentAlignment.MiddleLeft;
+        lblCount1.Height = 20;
+
+        // Настройка Label для счётчика второй панели
+        lblCount2 = new Label();
+        lblCount2.AutoSize = false;
+        lblCount2.TextAlign = ContentAlignment.MiddleLeft;
+        lblCount2.Height = 20;
+
         // Настройка ListView для рабочего стола
         listView1 = new ListView();
         imageList1 = new ImageList();
@@ -58,28 +102,51 @@ public partial class MainForm : Form
 
         // Настройка формы
         Text = "IconShift - Рабочий стол";
-        
+
         // Устанавливаем размер формы - 60% от экрана
         int screenWidth = Screen.PrimaryScreen!.Bounds.Width;
         int screenHeight = Screen.PrimaryScreen!.Bounds.Height;
         ClientSize = new Size((int)(screenWidth * 0.6), (int)(screenHeight * 0.6));
-        
+
         // Регистрируем обработчик изменения размера окна
         Resize += MainForm_Resize;
-        
+
+        // Заполняем выпадающие списки пользователями
+        PopulateUserComboBoxes();
+
         // Устанавливаем размеры панелей для растягивания на всё окно
         int panelWidth = (ClientSize.Width - 20) / 2;
+
+        comboBox1.Width = panelWidth - 45;
+        comboBox1.Location = new Point(10, 10);
+
+        btnOpenFolder1.Location = new Point(10 + panelWidth - 35, 10);
+
+        comboBox2.Width = panelWidth - 45;
+        comboBox2.Location = new Point(panelWidth + 10, 10);
+
+        btnOpenFolder2.Location = new Point(panelWidth + 10 + panelWidth - 35, 10);
+
+        lblCount1.Width = panelWidth;
+        lblCount1.Location = new Point(10, ClientSize.Height - 25);
+
+        lblCount2.Width = panelWidth;
+        lblCount2.Location = new Point(panelWidth + 10, ClientSize.Height - 25);
+
         listView1.Width = panelWidth;
+        listView1.Location = new Point(10, 45);
+        listView1.Height = ClientSize.Height - 75;
+
         listView2.Width = panelWidth;
-        
-        // Устанавливаем позиции
-        listView1.Location = new Point(10, 10);
-        listView2.Location = new Point(panelWidth + 10, 10);
-        
-        // Растягиваем ListView на всю доступную высоту
-        listView1.Height = ClientSize.Height - 20;
-        listView2.Height = ClientSize.Height - 20;
-        
+        listView2.Location = new Point(panelWidth + 10, 45);
+        listView2.Height = ClientSize.Height - 75;
+
+        Controls.Add(lblCount1);
+        Controls.Add(lblCount2);
+        Controls.Add(btnOpenFolder1);
+        Controls.Add(btnOpenFolder2);
+        Controls.Add(comboBox1);
+        Controls.Add(comboBox2);
         Controls.Add(listView2);
         Controls.Add(listView1);
         StartPosition = FormStartPosition.CenterScreen;
@@ -89,16 +156,30 @@ public partial class MainForm : Form
     {
         // Адаптируем размеры панелей при изменении размера окна
         int panelWidth = (ClientSize.Width - 20) / 2;
+
+        comboBox1.Width = panelWidth - 45;
+        comboBox1.Location = new Point(10, 10);
+
+        btnOpenFolder1.Location = new Point(10 + panelWidth - 35, 10);
+
+        comboBox2.Width = panelWidth - 45;
+        comboBox2.Location = new Point(panelWidth + 10, 10);
+
+        btnOpenFolder2.Location = new Point(panelWidth + 10 + panelWidth - 35, 10);
+
+        lblCount1.Width = panelWidth;
+        lblCount1.Location = new Point(10, ClientSize.Height - 25);
+
+        lblCount2.Width = panelWidth;
+        lblCount2.Location = new Point(panelWidth + 10, ClientSize.Height - 25);
+
         listView1.Width = panelWidth;
+        listView1.Location = new Point(10, 45);
+        listView1.Height = ClientSize.Height - 75;
+
         listView2.Width = panelWidth;
-        
-        // Устанавливаем позиции
-        listView1.Location = new Point(10, 10);
-        listView2.Location = new Point(panelWidth + 10, 10);
-        
-        // Растягиваем ListView на всю доступную высоту
-        listView1.Height = ClientSize.Height - 20;
-        listView2.Height = ClientSize.Height - 20;
+        listView2.Location = new Point(panelWidth + 10, 45);
+        listView2.Height = ClientSize.Height - 75;
     }
 
     private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
@@ -143,16 +224,16 @@ public partial class MainForm : Form
 
     private void ListView1_DragDrop(object? sender, DragEventArgs e)
     {
-        HandleDragDrop(e, listView1, listView2, 
-            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory));
+        HandleDragDrop(e, listView1, listView2,
+            GetCurrentDesktopPath(comboBox1),
+            GetCurrentDesktopPath(comboBox2));
     }
 
     private void ListView2_DragDrop(object? sender, DragEventArgs e)
     {
         HandleDragDrop(e, listView2, listView1,
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
-            Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
+            GetCurrentDesktopPath(comboBox2),
+            GetCurrentDesktopPath(comboBox1));
     }
 
     private void HandleDragDrop(DragEventArgs e, ListView targetListView, ListView sourceListView, string targetPath, string sourcePath)
@@ -312,7 +393,7 @@ public partial class MainForm : Form
     private void RefreshListView(ListView listView, string folderPath)
     {
         listView.Items.Clear();
-        
+
         try
         {
             DirectoryInfo dir = new DirectoryInfo(folderPath);
@@ -346,119 +427,35 @@ public partial class MainForm : Form
             {
                 bool aIsDir = a.Tag is DirectoryInfo;
                 bool bIsDir = b.Tag is DirectoryInfo;
-                
+
                 if (aIsDir && !bIsDir) return -1;
                 if (!aIsDir && bIsDir) return 1;
                 return string.Compare(a.Text, b.Text, StringComparison.OrdinalIgnoreCase);
             });
 
             listView.Items.AddRange(items.ToArray());
+
+            // Обновляем счётчик
+            Label label = listView == listView1 ? lblCount1 : lblCount2;
+            UpdateItemCount(label, listView);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Ошибка при обновлении списка: {ex.Message}", 
+            MessageBox.Show($"Ошибка при обновлении списка: {ex.Message}",
                 "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
     private void LoadDesktopFiles()
     {
-        try
-        {
-            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            DirectoryInfo desktopDir = new DirectoryInfo(desktopPath);
-
-            // Получаем все файлы и папки на рабочем столе
-            var items = new List<ListViewItem>();
-
-            // Сначала добавляем папки
-            foreach (var directory in desktopDir.EnumerateDirectories())
-            {
-                var listItem = CreateListViewItem(directory, imageList1);
-                if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
-            }
-
-            // Потом добавляем файлы
-            foreach (var file in desktopDir.EnumerateFiles())
-            {
-                var listItem = CreateListViewItem(file, imageList1);
-                if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
-            }
-
-            // Сортируем: сначала папки, потом файлы, по алфавиту внутри каждой группы
-            items.Sort((a, b) =>
-            {
-                bool aIsDir = a.Tag is DirectoryInfo;
-                bool bIsDir = b.Tag is DirectoryInfo;
-                
-                if (aIsDir && !bIsDir) return -1;
-                if (!aIsDir && bIsDir) return 1;
-                return string.Compare(a.Text, b.Text, StringComparison.OrdinalIgnoreCase);
-            });
-
-            listView1.Items.AddRange(items.ToArray());
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Ошибка при загрузке файлов рабочего стола: {ex.Message}", 
-                "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        string desktopPath = GetCurrentDesktopPath(comboBox1);
+        RefreshListView(listView1, desktopPath);
     }
 
     private void LoadCommonDesktopFiles()
     {
-        try
-        {
-            string commonDesktopPath = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
-            DirectoryInfo commonDesktopDir = new DirectoryInfo(commonDesktopPath);
-
-            // Получаем все файлы и папки в общих ярлыках
-            var items = new List<ListViewItem>();
-
-            // Сначала добавляем папки
-            foreach (var directory in commonDesktopDir.EnumerateDirectories())
-            {
-                var listItem = CreateListViewItem(directory, imageList2);
-                if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
-            }
-
-            // Потом добавляем файлы
-            foreach (var file in commonDesktopDir.EnumerateFiles())
-            {
-                var listItem = CreateListViewItem(file, imageList2);
-                if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
-            }
-
-            // Сортируем: сначала папки, потом файлы, по алфавиту внутри каждой группы
-            items.Sort((a, b) =>
-            {
-                bool aIsDir = a.Tag is DirectoryInfo;
-                bool bIsDir = b.Tag is DirectoryInfo;
-                
-                if (aIsDir && !bIsDir) return -1;
-                if (!aIsDir && bIsDir) return 1;
-                return string.Compare(a.Text, b.Text, StringComparison.OrdinalIgnoreCase);
-            });
-
-            listView2.Items.AddRange(items.ToArray());
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Ошибка при загрузке общих ярлыков: {ex.Message}", 
-                "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
+        RefreshListView(listView2, commonDesktopPath);
     }
 
     private ListViewItem? CreateListViewItem(FileInfo file, ImageList imageList)
@@ -567,5 +564,290 @@ public partial class MainForm : Form
         {
             return string.Empty;
         }
+    }
+
+    private void InitializeFileSystemWatchers()
+    {
+        // Настройка наблюдателя для личного рабочего стола
+        string desktopPath = GetCurrentDesktopPath(comboBox1);
+        desktopWatcher = new FileSystemWatcher(desktopPath);
+        desktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
+        desktopWatcher.Created += (s, e) => UpdateListView(listView1, desktopPath);
+        desktopWatcher.Deleted += (s, e) => UpdateListView(listView1, desktopPath);
+        desktopWatcher.Renamed += (s, e) => UpdateListView(listView1, desktopPath);
+        desktopWatcher.Changed += (s, e) => UpdateListView(listView1, desktopPath);
+        desktopWatcher.EnableRaisingEvents = true;
+
+        // Настройка наблюдателя для общего рабочего стола
+        string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
+        commonDesktopWatcher = new FileSystemWatcher(commonDesktopPath);
+        commonDesktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
+        commonDesktopWatcher.Created += (s, e) => UpdateListView(listView2, commonDesktopPath);
+        commonDesktopWatcher.Deleted += (s, e) => UpdateListView(listView2, commonDesktopPath);
+        commonDesktopWatcher.Renamed += (s, e) => UpdateListView(listView2, commonDesktopPath);
+        commonDesktopWatcher.Changed += (s, e) => UpdateListView(listView2, commonDesktopPath);
+        commonDesktopWatcher.EnableRaisingEvents = true;
+    }
+
+    private void PopulateUserComboBoxes()
+    {
+        // Добавляем опцию "Общая папка" в оба списка
+        comboBox1.Items.Add("Общая папка");
+        comboBox2.Items.Add("Общая папка");
+
+        // Получаем список профилей пользователей из реестра
+        try
+        {
+            using (RegistryKey? profileList = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"))
+            {
+                if (profileList != null)
+                {
+                    foreach (string sidName in profileList.GetSubKeyNames())
+                    {
+                        using (RegistryKey? profile = profileList.OpenSubKey(sidName))
+                        {
+                            if (profile != null)
+                            {
+                                string? profilePath = profile.GetValue("ProfileImagePath") as string;
+                                if (!string.IsNullOrEmpty(profilePath))
+                                {
+                                    string userName = Path.GetFileName(profilePath);
+
+                                    // Пропускаем системные профили
+                                    if (!userName.StartsWith("systemprofile") &&
+                                        !userName.StartsWith("LocalService") &&
+                                        !userName.StartsWith("NetworkService"))
+                                    {
+                                        // Проверяем перенаправление Desktop через User Shell Folders
+                                        string desktopPath = GetUserDesktopPath(sidName, profilePath);
+
+                                        // Проверяем существование папки Desktop
+                                        if (Directory.Exists(desktopPath))
+                                        {
+                                            var userItem = new UserProfileItem(userName, desktopPath);
+                                            comboBox1.Items.Add(userItem);
+                                            comboBox2.Items.Add(userItem);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Ошибка при чтении реестра: {ex.Message}",
+                "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        // Устанавливаем текущего пользователя для первой панели
+        string currentUser = Environment.UserName;
+        int currentUserIndex = -1;
+        for (int i = 0; i < comboBox1.Items.Count; i++)
+        {
+            if (comboBox1.Items[i] is UserProfileItem item && item.UserName == currentUser)
+            {
+                currentUserIndex = i;
+                break;
+            }
+        }
+
+        if (currentUserIndex != -1)
+        {
+            comboBox1.SelectedIndex = currentUserIndex;
+        }
+        else if (comboBox1.Items.Count > 0)
+        {
+            comboBox1.SelectedIndex = 0;
+        }
+
+        // Устанавливаем "Общая папка" для второй панели
+        comboBox2.SelectedIndex = 0;
+    }
+
+    private string GetUserDesktopPath(string sid, string profilePath)
+    {
+        try
+        {
+            // Пытаемся прочитать перенаправленный путь из User Shell Folders для конкретного SID
+            using (RegistryKey? userKey = Registry.Users.OpenSubKey($"{sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"))
+            {
+                if (userKey != null)
+                {
+                    string? desktopPath = userKey.GetValue("Desktop") as string;
+                    if (!string.IsNullOrEmpty(desktopPath))
+                    {
+                        // Разворачиваем переменные окружения
+                        desktopPath = Environment.ExpandEnvironmentVariables(desktopPath);
+                        if (Directory.Exists(desktopPath))
+                        {
+                            return desktopPath;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Игнорируем ошибки доступа к реестру других пользователей
+        }
+
+        // Проверяем стандартный путь
+        string standardPath = Path.Combine(profilePath, "Desktop");
+        if (Directory.Exists(standardPath))
+        {
+            return standardPath;
+        }
+
+        // Проверяем альтернативные пути на других дисках
+        string userName = Path.GetFileName(profilePath);
+        string[] driveLetters = { "D", "E", "F" };
+
+        foreach (string drive in driveLetters)
+        {
+            string altPath = Path.Combine($"{drive}:\\Users", userName, "Desktop");
+            if (Directory.Exists(altPath))
+            {
+                return altPath;
+            }
+        }
+
+        return standardPath;
+    }
+
+    private void ComboBox1_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (comboBox1.SelectedItem == null) return;
+
+        string selectedPath = GetCurrentDesktopPath(comboBox1);
+
+        // Обновляем FileSystemWatcher только если он уже инициализирован
+        if (desktopWatcher != null)
+        {
+            desktopWatcher.EnableRaisingEvents = false;
+            desktopWatcher.Path = selectedPath;
+            desktopWatcher.EnableRaisingEvents = true;
+        }
+
+        // Обновляем ListView
+        RefreshListView(listView1, selectedPath);
+        UpdateItemCount(lblCount1, listView1);
+    }
+
+    private void ComboBox2_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (comboBox2.SelectedItem == null) return;
+
+        string selectedPath = GetCurrentDesktopPath(comboBox2);
+
+        // Обновляем FileSystemWatcher только если он уже инициализирован
+        if (commonDesktopWatcher != null)
+        {
+            commonDesktopWatcher.EnableRaisingEvents = false;
+            commonDesktopWatcher.Path = selectedPath;
+            commonDesktopWatcher.EnableRaisingEvents = true;
+        }
+
+        // Обновляем ListView
+        RefreshListView(listView2, selectedPath);
+        UpdateItemCount(lblCount2, listView2);
+    }
+
+    private void BtnOpenFolder1_Click(object? sender, EventArgs e)
+    {
+        string folderPath = GetCurrentDesktopPath(comboBox1);
+        OpenFolderInExplorer(folderPath);
+    }
+
+    private void BtnOpenFolder2_Click(object? sender, EventArgs e)
+    {
+        string folderPath = GetCurrentDesktopPath(comboBox2);
+        OpenFolderInExplorer(folderPath);
+    }
+
+    private void OpenFolderInExplorer(string folderPath)
+    {
+        try
+        {
+            if (Directory.Exists(folderPath))
+            {
+                System.Diagnostics.Process.Start("explorer.exe", folderPath);
+            }
+            else
+            {
+                MessageBox.Show($"Папка не найдена: {folderPath}",
+                    "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Ошибка при открытии папки: {ex.Message}",
+                "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void UpdateItemCount(Label label, ListView listView)
+    {
+        int count = listView.Items.Count;
+        label.Text = $"Элементов: {count}";
+    }
+
+    private string GetCurrentDesktopPath(ComboBox comboBox)
+    {
+        if (comboBox.SelectedItem == null)
+            return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
+        if (comboBox.SelectedItem is string && comboBox.SelectedItem.ToString() == "Общая папка")
+        {
+            return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+        }
+        else if (comboBox.SelectedItem is UserProfileItem item)
+        {
+            return item.DesktopPath;
+        }
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+    }
+
+    private class UserProfileItem
+    {
+        public string UserName { get; }
+        public string DesktopPath { get; }
+
+        public UserProfileItem(string userName, string desktopPath)
+        {
+            UserName = userName;
+            DesktopPath = desktopPath;
+        }
+
+        public override string ToString()
+        {
+            return UserName;
+        }
+    }
+
+    private void UpdateListView(ListView listView, string folderPath)
+    {
+        // Проверяем, нужно ли вызвать метод в UI-потоке
+        if (listView.InvokeRequired)
+        {
+            listView.Invoke(new Action(() => RefreshListView(listView, folderPath)));
+        }
+        else
+        {
+            RefreshListView(listView, folderPath);
+        }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            desktopWatcher?.Dispose();
+            commonDesktopWatcher?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }
