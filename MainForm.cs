@@ -21,6 +21,10 @@ public partial class MainForm : Form
     private ImageList imageList2;
     private FileSystemWatcher desktopWatcher;
     private FileSystemWatcher commonDesktopWatcher;
+    private Form? dragOverlayForm;
+    private System.Windows.Forms.Timer dragOverlayTimer;
+    private Bitmap? dragOverlayBitmap;
+    private Point dragOverlayHotspot;
 
     [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
@@ -32,6 +36,48 @@ public partial class MainForm : Form
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SIZE
+    {
+        public int cx;
+        public int cy;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int x;
+        public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SHDRAGIMAGE
+    {
+        public SIZE sizeDragImage;
+        public POINT ptOffset;
+        public IntPtr hbmpDragImage;
+        public int crColorKey;
+    }
+
+    [ComImport]
+    [Guid("DE5BF786-477A-11d2-839D-00C04FD918D0")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDragSourceHelper
+    {
+        void InitializeFromBitmap(ref SHDRAGIMAGE pshdi, [MarshalAs(UnmanagedType.Interface)] object pDataObject);
+        void InitializeFromWindow(IntPtr hwnd, ref POINT ppt, [MarshalAs(UnmanagedType.Interface)] object pDataObject);
+    }
+
+    [ComImport]
+    [Guid("4657278A-411B-11d2-839A-00C04FD918D0")]
+    [ClassInterface(ClassInterfaceType.None)]
+    private class DragDropHelper
+    {
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct SHFILEINFO
@@ -71,9 +117,145 @@ public partial class MainForm : Form
     public MainForm()
     {
         InitializeComponent();
+        InitializeDragDropOverlay();
         InitializeFileSystemWatchers();
         LoadDesktopFiles();
         LoadCommonDesktopFiles();
+    }
+
+    private void InitializeDragDropOverlay()
+    {
+        dragOverlayTimer = new System.Windows.Forms.Timer();
+        dragOverlayTimer.Interval = 20;
+        dragOverlayTimer.Tick += DragOverlayTimer_Tick;
+    }
+
+    private void DragOverlayTimer_Tick(object? sender, EventArgs e)
+    {
+        if (dragOverlayForm != null && dragOverlayForm.Visible)
+        {
+            UpdateDragOverlayPosition();
+        }
+    }
+
+    private void StartDragOverlay(ListView sourceListView, ListViewItem item, DataObject dataObject)
+    {
+        if (item == null)
+        {
+            return;
+        }
+
+        dragOverlayBitmap?.Dispose();
+
+        int iconSize = 48;
+        int padding = 8;
+        using Font font = SystemFonts.MenuFont;
+        Size textSize = TextRenderer.MeasureText(item.Text, font);
+        int width = iconSize + padding * 3 + Math.Min(textSize.Width, 220);
+        int height = Math.Max(iconSize + padding * 2, textSize.Height + padding * 2);
+
+        dragOverlayBitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (Graphics g = Graphics.FromImage(dragOverlayBitmap))
+        {
+            g.Clear(Color.Transparent);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            using var backgroundBrush = new SolidBrush(Color.FromArgb(220, Color.White));
+            g.FillRectangle(backgroundBrush, 0, 0, width, height);
+            g.DrawRectangle(Pens.LightGray, 0, 0, width - 1, height - 1);
+
+            Image? iconImage = null;
+            if (sourceListView.LargeImageList != null && item.ImageIndex >= 0 && item.ImageIndex < sourceListView.LargeImageList.Images.Count)
+            {
+                iconImage = sourceListView.LargeImageList.Images[item.ImageIndex];
+            }
+
+            if (iconImage != null)
+            {
+                g.DrawImage(iconImage, new Rectangle(padding, padding, iconSize, iconSize));
+            }
+
+            var textRect = new Rectangle(iconSize + padding * 2, padding, width - iconSize - padding * 3, height - padding * 2);
+            TextRenderer.DrawText(g, item.Text, font, textRect, Color.Black, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        dragOverlayHotspot = new Point(padding, padding);
+
+        if (!TryInitializeShellDragImage(dataObject, dragOverlayBitmap, dragOverlayHotspot))
+        {
+            dragOverlayForm = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                ShowInTaskbar = false,
+                StartPosition = FormStartPosition.Manual,
+                BackColor = Color.White,
+                TransparencyKey = Color.Empty,
+                AllowTransparency = true,
+                TopMost = true,
+                Size = dragOverlayBitmap.Size,
+                Opacity = 0.85
+            };
+
+            dragOverlayForm.BackgroundImage = dragOverlayBitmap;
+            dragOverlayForm.BackgroundImageLayout = ImageLayout.None;
+            dragOverlayForm.Show();
+            UpdateDragOverlayPosition();
+            dragOverlayTimer.Start();
+        }
+    }
+
+    private void UpdateDragOverlayPosition()
+    {
+        if (dragOverlayForm == null)
+        {
+            return;
+        }
+
+        Point cursorPos = Cursor.Position;
+        dragOverlayForm.Location = new Point(cursorPos.X - dragOverlayHotspot.X, cursorPos.Y - dragOverlayHotspot.Y);
+    }
+
+    private void EndDragOverlay()
+    {
+        dragOverlayTimer.Stop();
+
+        if (dragOverlayForm != null)
+        {
+            dragOverlayForm.Close();
+            dragOverlayForm.Dispose();
+            dragOverlayForm = null;
+        }
+
+        dragOverlayBitmap?.Dispose();
+        dragOverlayBitmap = null;
+    }
+
+    private bool TryInitializeShellDragImage(DataObject dataObject, Bitmap dragBitmap, Point hotspot)
+    {
+        try
+        {
+            var helper = (IDragSourceHelper)new DragDropHelper();
+            IntPtr hBitmap = dragBitmap.GetHbitmap(Color.FromArgb(0));
+            var shdi = new SHDRAGIMAGE
+            {
+                sizeDragImage = new SIZE { cx = dragBitmap.Width, cy = dragBitmap.Height },
+                ptOffset = new POINT { x = hotspot.X, y = hotspot.Y },
+                hbmpDragImage = hBitmap,
+                crColorKey = unchecked((int)0xFFFFFFFF)
+            };
+
+            helper.InitializeFromBitmap(ref shdi, dataObject);
+            DeleteObject(hBitmap);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ListView_GiveFeedback(object? sender, GiveFeedbackEventArgs e)
+    {
+        e.UseDefaultCursors = true;
     }
 
     private void InitializeComponent()
@@ -248,17 +430,43 @@ public partial class MainForm : Form
 
     private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
+        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
         {
-            DoDragDrop(item, DragDropEffects.Move | DragDropEffects.Copy);
+            var dataObject = new DataObject();
+            dataObject.SetData(typeof(ListViewItem).FullName!, item);
+            StartDragOverlay(listView, item, dataObject);
+            listView.GiveFeedback += ListView_GiveFeedback;
+
+            try
+            {
+                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
+            }
+            finally
+            {
+                listView.GiveFeedback -= ListView_GiveFeedback;
+                EndDragOverlay();
+            }
         }
     }
 
     private void ListView2_ItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
+        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
         {
-            DoDragDrop(item, DragDropEffects.Move | DragDropEffects.Copy);
+            var dataObject = new DataObject();
+            dataObject.SetData(typeof(ListViewItem).FullName!, item);
+            StartDragOverlay(listView, item, dataObject);
+            listView.GiveFeedback += ListView_GiveFeedback;
+
+            try
+            {
+                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
+            }
+            finally
+            {
+                listView.GiveFeedback -= ListView_GiveFeedback;
+                EndDragOverlay();
+            }
         }
     }
 
@@ -312,6 +520,12 @@ public partial class MainForm : Form
             if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem item)
             {
                 draggedItem = item;
+
+                // Если элемент был отпущен в той же панели, ничего не делаем
+                if (item.ListView == targetListView)
+                {
+                    return;
+                }
                 
                 // Получаем информацию о перетаскиваемом элементе
                 string itemName = item.Text;
