@@ -22,6 +22,52 @@ public partial class MainForm : Form
     private FileSystemWatcher desktopWatcher;
     private FileSystemWatcher commonDesktopWatcher;
 
+    [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SHGetFileInfo(
+        string pszPath,
+        uint dwFileAttributes,
+        ref SHFILEINFO psfi,
+        uint cbFileInfo,
+        uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct SHFILEINFO
+    {
+        public IntPtr hIcon;
+        public int iIcon;
+        public uint dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+        public string szTypeName;
+    }
+
+    private const uint SHGFI_ICON = 0x000000100;
+    private const uint SHGFI_LARGEICON = 0x000000000;
+    private const uint SHGFI_USEFILEATTRIBUTES = 0x000000010;
+    private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+
+    private static Icon? GetSystemIcon(string path, bool isDirectory)
+    {
+        var shinfo = new SHFILEINFO();
+        uint flags = SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES;
+        uint attributes = isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        IntPtr result = SHGetFileInfo(path, attributes, ref shinfo, (uint)Marshal.SizeOf(shinfo), flags);
+
+        if (result != IntPtr.Zero && shinfo.hIcon != IntPtr.Zero)
+        {
+            Icon icon = (Icon)Icon.FromHandle(shinfo.hIcon).Clone();
+            DestroyIcon(shinfo.hIcon);
+            return icon;
+        }
+
+        return null;
+    }
+
     public MainForm()
     {
         InitializeComponent();
@@ -103,10 +149,10 @@ public partial class MainForm : Form
         // Настройка формы
         Text = "IconShift - Рабочий стол";
 
-        // Устанавливаем размер формы - 60% от экрана
+        // Устанавливаем размер формы - 85% от экрана
         int screenWidth = Screen.PrimaryScreen!.Bounds.Width;
         int screenHeight = Screen.PrimaryScreen!.Bounds.Height;
-        ClientSize = new Size((int)(screenWidth * 0.6), (int)(screenHeight * 0.6));
+        ClientSize = new Size((int)(screenWidth * 0.85), (int)(screenHeight * 0.85));
 
         // Регистрируем обработчик изменения размера окна
         Resize += MainForm_Resize;
@@ -115,31 +161,40 @@ public partial class MainForm : Form
         PopulateUserComboBoxes();
 
         // Устанавливаем размеры панелей для растягивания на всё окно
-        int panelWidth = (ClientSize.Width - 20) / 2;
+        int panelSpacing = 45;
+        int topMargin = 10;
+        int controlAreaHeight = 25;
+        int afterControlsSpacing = 2;
+        int bottomMargin = 35;
+        int labelHeight = 20;
+        int labelSpacing = 5;
+        int panelWidth = (ClientSize.Width - panelSpacing - 30) / 2;
+        int panelTop = topMargin + controlAreaHeight + afterControlsSpacing;
+        int labelTop = ClientSize.Height - bottomMargin - labelHeight;
 
         comboBox1.Width = panelWidth - 45;
-        comboBox1.Location = new Point(10, 10);
+        comboBox1.Location = new Point(15, topMargin);
 
-        btnOpenFolder1.Location = new Point(10 + panelWidth - 35, 10);
+        btnOpenFolder1.Location = new Point(15 + panelWidth - 35, topMargin);
 
         comboBox2.Width = panelWidth - 45;
-        comboBox2.Location = new Point(panelWidth + 10, 10);
+        comboBox2.Location = new Point(panelWidth + panelSpacing + 15, topMargin);
 
-        btnOpenFolder2.Location = new Point(panelWidth + 10 + panelWidth - 35, 10);
+        btnOpenFolder2.Location = new Point(panelWidth + panelSpacing + 15 + panelWidth - 35, topMargin);
 
         lblCount1.Width = panelWidth;
-        lblCount1.Location = new Point(10, ClientSize.Height - 25);
+        lblCount1.Location = new Point(15, labelTop);
 
         lblCount2.Width = panelWidth;
-        lblCount2.Location = new Point(panelWidth + 10, ClientSize.Height - 25);
+        lblCount2.Location = new Point(panelWidth + panelSpacing + 15, labelTop);
 
         listView1.Width = panelWidth;
-        listView1.Location = new Point(10, 45);
-        listView1.Height = ClientSize.Height - 75;
+        listView1.Location = new Point(15, panelTop);
+        listView1.Height = labelTop - panelTop - labelSpacing;
 
         listView2.Width = panelWidth;
-        listView2.Location = new Point(panelWidth + 10, 45);
-        listView2.Height = ClientSize.Height - 75;
+        listView2.Location = new Point(panelWidth + panelSpacing + 15, panelTop);
+        listView2.Height = labelTop - panelTop - labelSpacing;
 
         Controls.Add(lblCount1);
         Controls.Add(lblCount2);
@@ -155,31 +210,40 @@ public partial class MainForm : Form
     private void MainForm_Resize(object? sender, EventArgs e)
     {
         // Адаптируем размеры панелей при изменении размера окна
-        int panelWidth = (ClientSize.Width - 20) / 2;
+        int panelSpacing = 45;
+        int topMargin = 10;
+        int controlAreaHeight = 25;
+        int afterControlsSpacing = 2;
+        int bottomMargin = 35;
+        int labelHeight = 20;
+        int labelSpacing = 5;
+        int panelWidth = (ClientSize.Width - panelSpacing - 30) / 2;
+        int panelTop = topMargin + controlAreaHeight + afterControlsSpacing;
+        int labelTop = ClientSize.Height - bottomMargin - labelHeight;
 
         comboBox1.Width = panelWidth - 45;
-        comboBox1.Location = new Point(10, 10);
+        comboBox1.Location = new Point(15, topMargin);
 
-        btnOpenFolder1.Location = new Point(10 + panelWidth - 35, 10);
+        btnOpenFolder1.Location = new Point(15 + panelWidth - 35, topMargin);
 
         comboBox2.Width = panelWidth - 45;
-        comboBox2.Location = new Point(panelWidth + 10, 10);
+        comboBox2.Location = new Point(panelWidth + panelSpacing + 15, topMargin);
 
-        btnOpenFolder2.Location = new Point(panelWidth + 10 + panelWidth - 35, 10);
+        btnOpenFolder2.Location = new Point(panelWidth + panelSpacing + 15 + panelWidth - 35, topMargin);
 
         lblCount1.Width = panelWidth;
-        lblCount1.Location = new Point(10, ClientSize.Height - 25);
+        lblCount1.Location = new Point(15, labelTop);
 
         lblCount2.Width = panelWidth;
-        lblCount2.Location = new Point(panelWidth + 10, ClientSize.Height - 25);
+        lblCount2.Location = new Point(panelWidth + panelSpacing + 15, labelTop);
 
         listView1.Width = panelWidth;
-        listView1.Location = new Point(10, 45);
-        listView1.Height = ClientSize.Height - 75;
+        listView1.Location = new Point(15, panelTop);
+        listView1.Height = labelTop - panelTop - labelSpacing;
 
         listView2.Width = panelWidth;
-        listView2.Location = new Point(panelWidth + 10, 45);
-        listView2.Height = ClientSize.Height - 75;
+        listView2.Location = new Point(panelWidth + panelSpacing + 15, panelTop);
+        listView2.Height = labelTop - panelTop - labelSpacing;
     }
 
     private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
@@ -437,7 +501,7 @@ public partial class MainForm : Form
 
             // Обновляем счётчик
             Label label = listView == listView1 ? lblCount1 : lblCount2;
-            UpdateItemCount(label, listView);
+            UpdateItemCount(label, listView, folderPath);
         }
         catch (Exception ex)
         {
@@ -512,13 +576,11 @@ public partial class MainForm : Form
         try
         {
             string displayName = directory.Name;
-            Icon icon = SystemIcons.Application;
+            Icon? icon = GetSystemIcon(directory.FullName, true) ?? SystemIcons.Application;
 
-            // Добавляем иконку в ImageList
             int iconIndex = imageList.Images.Count;
             imageList.Images.Add(icon);
 
-            // Создаем элемент ListView
             var listItem = new ListViewItem
             {
                 Text = displayName,
@@ -733,7 +795,7 @@ public partial class MainForm : Form
 
         // Обновляем ListView
         RefreshListView(listView1, selectedPath);
-        UpdateItemCount(lblCount1, listView1);
+        UpdateItemCount(lblCount1, listView1, selectedPath);
     }
 
     private void ComboBox2_SelectedIndexChanged(object? sender, EventArgs e)
@@ -752,7 +814,7 @@ public partial class MainForm : Form
 
         // Обновляем ListView
         RefreshListView(listView2, selectedPath);
-        UpdateItemCount(lblCount2, listView2);
+        UpdateItemCount(lblCount2, listView2, selectedPath);
     }
 
     private void BtnOpenFolder1_Click(object? sender, EventArgs e)
@@ -788,10 +850,17 @@ public partial class MainForm : Form
         }
     }
 
-    private void UpdateItemCount(Label label, ListView listView)
+    private void UpdateItemCount(Label label, ListView listView, string folderPath = "")
     {
         int count = listView.Items.Count;
-        label.Text = $"Элементов: {count}";
+        if (!string.IsNullOrEmpty(folderPath))
+        {
+            label.Text = $"Элементов: {count}  |  {folderPath}";
+        }
+        else
+        {
+            label.Text = $"Элементов: {count}";
+        }
     }
 
     private string GetCurrentDesktopPath(ComboBox comboBox)
