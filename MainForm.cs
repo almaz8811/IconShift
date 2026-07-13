@@ -11,16 +11,22 @@ public partial class MainForm : Form
 {
     private ComboBox comboBox1;
     private ComboBox comboBox2;
+    private ComboBox comboBox3;
     private Button btnOpenFolder1;
     private Button btnOpenFolder2;
+    private Button btnOpenFolder3;
     private Label lblCount1;
     private Label lblCount2;
+    private Label lblCount3;
     private ListView listView1;
     private ImageList imageList1;
     private ListView listView2;
     private ImageList imageList2;
+    private ListView listView3;
+    private ImageList imageList3;
     private FileSystemWatcher desktopWatcher;
     private FileSystemWatcher commonDesktopWatcher;
+    private FileSystemWatcher thirdDesktopWatcher;
     private Form? dragOverlayForm;
     private System.Windows.Forms.Timer dragOverlayTimer;
     private Bitmap? dragOverlayBitmap;
@@ -121,6 +127,7 @@ public partial class MainForm : Form
         InitializeFileSystemWatchers();
         LoadDesktopFiles();
         LoadCommonDesktopFiles();
+        LoadThirdDesktopFiles();
     }
 
     private void InitializeDragDropOverlay()
@@ -282,6 +289,17 @@ public partial class MainForm : Form
         btnOpenFolder2.Width = 35;
         btnOpenFolder2.Click += BtnOpenFolder2_Click;
 
+        // Настройка ComboBox для третьей панели
+        comboBox3 = new ComboBox();
+        comboBox3.DropDownStyle = ComboBoxStyle.DropDownList;
+        comboBox3.SelectedIndexChanged += ComboBox3_SelectedIndexChanged;
+
+        // Настройка кнопки открытия папки для третьей панели
+        btnOpenFolder3 = new Button();
+        btnOpenFolder3.Text = "📁";
+        btnOpenFolder3.Width = 35;
+        btnOpenFolder3.Click += BtnOpenFolder3_Click;
+
         // Настройка Label для счётчика первой панели
         lblCount1 = new Label();
         lblCount1.AutoSize = false;
@@ -294,6 +312,12 @@ public partial class MainForm : Form
         lblCount2.TextAlign = ContentAlignment.MiddleLeft;
         lblCount2.Height = 20;
 
+        // Настройка Label для счётчика третьей панели
+        lblCount3 = new Label();
+        lblCount3.AutoSize = false;
+        lblCount3.TextAlign = ContentAlignment.MiddleLeft;
+        lblCount3.Height = 20;
+
         // Настройка ListView для рабочего стола
         listView1 = new ListView();
         imageList1 = new ImageList();
@@ -302,13 +326,21 @@ public partial class MainForm : Form
         listView2 = new ListView();
         imageList2 = new ImageList();
 
+        // Настройка ListView для третьей панели
+        listView3 = new ListView();
+        imageList3 = new ImageList();
+
         // Настройка ImageList1
         imageList1.ColorDepth = ColorDepth.Depth32Bit;
-        imageList1.ImageSize = new Size(48, 48);
+        imageList1.ImageSize = new Size(32, 32);
 
         // Настройка ImageList2
         imageList2.ColorDepth = ColorDepth.Depth32Bit;
-        imageList2.ImageSize = new Size(48, 48);
+        imageList2.ImageSize = new Size(32, 32);
+
+        // Настройка ImageList3
+        imageList3.ColorDepth = ColorDepth.Depth32Bit;
+        imageList3.ImageSize = new Size(32, 32);
 
         // Настройка ListView1 (левая панель - рабочий стол)
         listView1.View = View.LargeIcon;
@@ -328,6 +360,15 @@ public partial class MainForm : Form
         listView2.DragEnter += ListView2_DragEnter;
         listView2.DragDrop += ListView2_DragDrop;
 
+        // Настройка ListView3 (третья панель)
+        listView3.View = View.LargeIcon;
+        listView3.FullRowSelect = true;
+        listView3.LargeImageList = imageList3;
+        listView3.AllowDrop = true;
+        listView3.ItemDrag += ListView3_ItemDrag;
+        listView3.DragEnter += ListView3_DragEnter;
+        listView3.DragDrop += ListView3_DragDrop;
+
         // Настройка формы
         Text = "IconShift - Рабочий стол";
 
@@ -343,89 +384,118 @@ public partial class MainForm : Form
         PopulateUserComboBoxes();
 
         // Устанавливаем размеры панелей для растягивания на всё окно
-        int panelSpacing = 45;
+        int panelSpacing = 20;
         int topMargin = 10;
         int controlAreaHeight = 25;
         int afterControlsSpacing = 2;
         int bottomMargin = 35;
         int labelHeight = 20;
         int labelSpacing = 5;
-        int panelWidth = (ClientSize.Width - panelSpacing - 30) / 2;
+        int panelWidth = (ClientSize.Width - panelSpacing * 2 - 30) / 3;
         int panelTop = topMargin + controlAreaHeight + afterControlsSpacing;
         int labelTop = ClientSize.Height - bottomMargin - labelHeight;
 
+        int panel2X = 15 + panelWidth + panelSpacing;
+        int panel3X = 15 + (panelWidth + panelSpacing) * 2;
+
         comboBox1.Width = panelWidth - 45;
         comboBox1.Location = new Point(15, topMargin);
-
         btnOpenFolder1.Location = new Point(15 + panelWidth - 35, topMargin);
 
         comboBox2.Width = panelWidth - 45;
-        comboBox2.Location = new Point(panelWidth + panelSpacing + 15, topMargin);
+        comboBox2.Location = new Point(panel2X, topMargin);
+        btnOpenFolder2.Location = new Point(panel2X + panelWidth - 35, topMargin);
 
-        btnOpenFolder2.Location = new Point(panelWidth + panelSpacing + 15 + panelWidth - 35, topMargin);
+        comboBox3.Width = panelWidth - 45;
+        comboBox3.Location = new Point(panel3X, topMargin);
+        btnOpenFolder3.Location = new Point(panel3X + panelWidth - 35, topMargin);
 
         lblCount1.Width = panelWidth;
         lblCount1.Location = new Point(15, labelTop);
 
         lblCount2.Width = panelWidth;
-        lblCount2.Location = new Point(panelWidth + panelSpacing + 15, labelTop);
+        lblCount2.Location = new Point(panel2X, labelTop);
+
+        lblCount3.Width = panelWidth;
+        lblCount3.Location = new Point(panel3X, labelTop);
 
         listView1.Width = panelWidth;
         listView1.Location = new Point(15, panelTop);
         listView1.Height = labelTop - panelTop - labelSpacing;
 
         listView2.Width = panelWidth;
-        listView2.Location = new Point(panelWidth + panelSpacing + 15, panelTop);
+        listView2.Location = new Point(panel2X, panelTop);
         listView2.Height = labelTop - panelTop - labelSpacing;
+
+        listView3.Width = panelWidth;
+        listView3.Location = new Point(panel3X, panelTop);
+        listView3.Height = labelTop - panelTop - labelSpacing;
 
         Controls.Add(lblCount1);
         Controls.Add(lblCount2);
+        Controls.Add(lblCount3);
         Controls.Add(btnOpenFolder1);
         Controls.Add(btnOpenFolder2);
+        Controls.Add(btnOpenFolder3);
         Controls.Add(comboBox1);
         Controls.Add(comboBox2);
+        Controls.Add(comboBox3);
+        Controls.Add(listView3);
         Controls.Add(listView2);
         Controls.Add(listView1);
         StartPosition = FormStartPosition.CenterScreen;
+        WindowState = FormWindowState.Maximized;
     }
 
     private void MainForm_Resize(object? sender, EventArgs e)
     {
         // Адаптируем размеры панелей при изменении размера окна
-        int panelSpacing = 45;
+        int panelSpacing = 20;
         int topMargin = 10;
         int controlAreaHeight = 25;
         int afterControlsSpacing = 2;
         int bottomMargin = 35;
         int labelHeight = 20;
         int labelSpacing = 5;
-        int panelWidth = (ClientSize.Width - panelSpacing - 30) / 2;
+        int panelWidth = (ClientSize.Width - panelSpacing * 2 - 30) / 3;
         int panelTop = topMargin + controlAreaHeight + afterControlsSpacing;
         int labelTop = ClientSize.Height - bottomMargin - labelHeight;
 
+        int panel2X = 15 + panelWidth + panelSpacing;
+        int panel3X = 15 + (panelWidth + panelSpacing) * 2;
+
         comboBox1.Width = panelWidth - 45;
         comboBox1.Location = new Point(15, topMargin);
-
         btnOpenFolder1.Location = new Point(15 + panelWidth - 35, topMargin);
 
         comboBox2.Width = panelWidth - 45;
-        comboBox2.Location = new Point(panelWidth + panelSpacing + 15, topMargin);
+        comboBox2.Location = new Point(panel2X, topMargin);
+        btnOpenFolder2.Location = new Point(panel2X + panelWidth - 35, topMargin);
 
-        btnOpenFolder2.Location = new Point(panelWidth + panelSpacing + 15 + panelWidth - 35, topMargin);
+        comboBox3.Width = panelWidth - 45;
+        comboBox3.Location = new Point(panel3X, topMargin);
+        btnOpenFolder3.Location = new Point(panel3X + panelWidth - 35, topMargin);
 
         lblCount1.Width = panelWidth;
         lblCount1.Location = new Point(15, labelTop);
 
         lblCount2.Width = panelWidth;
-        lblCount2.Location = new Point(panelWidth + panelSpacing + 15, labelTop);
+        lblCount2.Location = new Point(panel2X, labelTop);
+
+        lblCount3.Width = panelWidth;
+        lblCount3.Location = new Point(panel3X, labelTop);
 
         listView1.Width = panelWidth;
         listView1.Location = new Point(15, panelTop);
         listView1.Height = labelTop - panelTop - labelSpacing;
 
         listView2.Width = panelWidth;
-        listView2.Location = new Point(panelWidth + panelSpacing + 15, panelTop);
+        listView2.Location = new Point(panel2X, panelTop);
         listView2.Height = labelTop - panelTop - labelSpacing;
+
+        listView3.Width = panelWidth;
+        listView3.Location = new Point(panel3X, panelTop);
+        listView3.Height = labelTop - panelTop - labelSpacing;
     }
 
     private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
@@ -496,21 +566,56 @@ public partial class MainForm : Form
 
     private void ListView1_DragDrop(object? sender, DragEventArgs e)
     {
-        HandleDragDrop(e, listView1, listView2,
-            GetCurrentDesktopPath(comboBox1),
-            GetCurrentDesktopPath(comboBox2));
+        HandleDragDrop(e, listView1, GetCurrentDesktopPath(comboBox1));
     }
 
     private void ListView2_DragDrop(object? sender, DragEventArgs e)
     {
-        HandleDragDrop(e, listView2, listView1,
-            GetCurrentDesktopPath(comboBox2),
-            GetCurrentDesktopPath(comboBox1));
+        HandleDragDrop(e, listView2, GetCurrentDesktopPath(comboBox2));
     }
 
-    private void HandleDragDrop(DragEventArgs e, ListView targetListView, ListView sourceListView, string targetPath, string sourcePath)
+    private void ListView3_ItemDrag(object? sender, ItemDragEventArgs e)
+    {
+        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
+        {
+            var dataObject = new DataObject();
+            dataObject.SetData(typeof(ListViewItem).FullName!, item);
+            StartDragOverlay(listView, item, dataObject);
+            listView.GiveFeedback += ListView_GiveFeedback;
+
+            try
+            {
+                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
+            }
+            finally
+            {
+                listView.GiveFeedback -= ListView_GiveFeedback;
+                EndDragOverlay();
+            }
+        }
+    }
+
+    private void ListView3_DragEnter(object? sender, DragEventArgs e)
+    {
+        if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem)
+        {
+            e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
+        }
+        else
+        {
+            e.Effect = DragDropEffects.None;
+        }
+    }
+
+    private void ListView3_DragDrop(object? sender, DragEventArgs e)
+    {
+        HandleDragDrop(e, listView3, GetCurrentDesktopPath(comboBox3));
+    }
+
+    private void HandleDragDrop(DragEventArgs e, ListView targetListView, string targetPath)
     {
         ListViewItem? draggedItem = null;
+        ListView? sourceListView = null;
         object? tag = null;
         string? sourceFilePath = null;
         string? targetFilePath = null;
@@ -520,9 +625,10 @@ public partial class MainForm : Form
             if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem item)
             {
                 draggedItem = item;
+                sourceListView = item.ListView;
 
                 // Если элемент был отпущен в той же панели, ничего не делаем
-                if (item.ListView == targetListView)
+                if (sourceListView == targetListView)
                 {
                     return;
                 }
@@ -589,7 +695,11 @@ public partial class MainForm : Form
                 // Обновляем интерфейс
                 item.Remove();
                 RefreshListView(targetListView, targetPath);
-                RefreshListView(sourceListView, sourcePath);
+                if (sourceListView != null)
+                {
+                    string sourcePath = GetDesktopPathForListView(sourceListView);
+                    RefreshListView(sourceListView, sourcePath);
+                }
             }
         }
         catch (UnauthorizedAccessException ex)
@@ -633,7 +743,11 @@ public partial class MainForm : Form
                         // Обновляем интерфейс
                         draggedItem.Remove();
                         RefreshListView(targetListView, targetPath);
-                        RefreshListView(sourceListView, sourcePath);
+                        if (sourceListView != null)
+                        {
+                            string sourcePath = GetDesktopPathForListView(sourceListView);
+                            RefreshListView(sourceListView, sourcePath);
+                        }
                     }
                     catch (Exception copyEx)
                     {
@@ -678,7 +792,13 @@ public partial class MainForm : Form
             var items = new List<ListViewItem>();
 
             // Получаем нужный ImageList для ListView
-            ImageList imageList = listView == listView1 ? imageList1 : imageList2;
+            ImageList imageList;
+            if (listView == listView1)
+                imageList = imageList1;
+            else if (listView == listView2)
+                imageList = imageList2;
+            else
+                imageList = imageList3;
 
             // Сначала добавляем папки
             foreach (var directory in dir.EnumerateDirectories())
@@ -714,7 +834,14 @@ public partial class MainForm : Form
             listView.Items.AddRange(items.ToArray());
 
             // Обновляем счётчик
-            Label label = listView == listView1 ? lblCount1 : lblCount2;
+            Label label;
+            if (listView == listView1)
+                label = lblCount1;
+            else if (listView == listView2)
+                label = lblCount2;
+            else
+                label = lblCount3;
+
             UpdateItemCount(label, listView, folderPath);
         }
         catch (Exception ex)
@@ -734,6 +861,12 @@ public partial class MainForm : Form
     {
         string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
         RefreshListView(listView2, commonDesktopPath);
+    }
+
+    private void LoadThirdDesktopFiles()
+    {
+        string thirdDesktopPath = GetCurrentDesktopPath(comboBox3);
+        RefreshListView(listView3, thirdDesktopPath);
     }
 
     private ListViewItem? CreateListViewItem(FileInfo file, ImageList imageList)
@@ -848,28 +981,38 @@ public partial class MainForm : Form
         string desktopPath = GetCurrentDesktopPath(comboBox1);
         desktopWatcher = new FileSystemWatcher(desktopPath);
         desktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
-        desktopWatcher.Created += (s, e) => UpdateListView(listView1, desktopPath);
-        desktopWatcher.Deleted += (s, e) => UpdateListView(listView1, desktopPath);
-        desktopWatcher.Renamed += (s, e) => UpdateListView(listView1, desktopPath);
-        desktopWatcher.Changed += (s, e) => UpdateListView(listView1, desktopPath);
+        desktopWatcher.Created += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
+        desktopWatcher.Deleted += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
+        desktopWatcher.Renamed += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
+        desktopWatcher.Changed += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
         desktopWatcher.EnableRaisingEvents = true;
 
         // Настройка наблюдателя для общего рабочего стола
         string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
         commonDesktopWatcher = new FileSystemWatcher(commonDesktopPath);
         commonDesktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
-        commonDesktopWatcher.Created += (s, e) => UpdateListView(listView2, commonDesktopPath);
-        commonDesktopWatcher.Deleted += (s, e) => UpdateListView(listView2, commonDesktopPath);
-        commonDesktopWatcher.Renamed += (s, e) => UpdateListView(listView2, commonDesktopPath);
-        commonDesktopWatcher.Changed += (s, e) => UpdateListView(listView2, commonDesktopPath);
+        commonDesktopWatcher.Created += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
+        commonDesktopWatcher.Deleted += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
+        commonDesktopWatcher.Renamed += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
+        commonDesktopWatcher.Changed += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
         commonDesktopWatcher.EnableRaisingEvents = true;
+
+        string thirdDesktopPath = GetCurrentDesktopPath(comboBox3);
+        thirdDesktopWatcher = new FileSystemWatcher(thirdDesktopPath);
+        thirdDesktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
+        thirdDesktopWatcher.Created += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
+        thirdDesktopWatcher.Deleted += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
+        thirdDesktopWatcher.Renamed += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
+        thirdDesktopWatcher.Changed += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
+        thirdDesktopWatcher.EnableRaisingEvents = true;
     }
 
     private void PopulateUserComboBoxes()
     {
-        // Добавляем опцию "Общая папка" в оба списка
+        // Добавляем опцию "Общая папка" в три списка
         comboBox1.Items.Add("Общая папка");
         comboBox2.Items.Add("Общая папка");
+        comboBox3.Items.Add("Общая папка");
 
         // Получаем список профилей пользователей из реестра
         try
@@ -903,6 +1046,7 @@ public partial class MainForm : Form
                                             var userItem = new UserProfileItem(userName, desktopPath);
                                             comboBox1.Items.Add(userItem);
                                             comboBox2.Items.Add(userItem);
+                                            comboBox3.Items.Add(userItem);
                                         }
                                     }
                                 }
@@ -933,14 +1077,15 @@ public partial class MainForm : Form
         if (currentUserIndex != -1)
         {
             comboBox1.SelectedIndex = currentUserIndex;
+            comboBox2.SelectedIndex = currentUserIndex;
+            comboBox3.SelectedIndex = currentUserIndex;
         }
         else if (comboBox1.Items.Count > 0)
         {
             comboBox1.SelectedIndex = 0;
+            comboBox2.SelectedIndex = 0;
+            comboBox3.SelectedIndex = 0;
         }
-
-        // Устанавливаем "Общая папка" для второй панели
-        comboBox2.SelectedIndex = 0;
     }
 
     private string GetUserDesktopPath(string sid, string profilePath)
@@ -1031,6 +1176,23 @@ public partial class MainForm : Form
         UpdateItemCount(lblCount2, listView2, selectedPath);
     }
 
+    private void ComboBox3_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (comboBox3.SelectedItem == null) return;
+
+        string selectedPath = GetCurrentDesktopPath(comboBox3);
+
+        if (thirdDesktopWatcher != null)
+        {
+            thirdDesktopWatcher.EnableRaisingEvents = false;
+            thirdDesktopWatcher.Path = selectedPath;
+            thirdDesktopWatcher.EnableRaisingEvents = true;
+        }
+
+        RefreshListView(listView3, selectedPath);
+        UpdateItemCount(lblCount3, listView3, selectedPath);
+    }
+
     private void BtnOpenFolder1_Click(object? sender, EventArgs e)
     {
         string folderPath = GetCurrentDesktopPath(comboBox1);
@@ -1040,6 +1202,12 @@ public partial class MainForm : Form
     private void BtnOpenFolder2_Click(object? sender, EventArgs e)
     {
         string folderPath = GetCurrentDesktopPath(comboBox2);
+        OpenFolderInExplorer(folderPath);
+    }
+
+    private void BtnOpenFolder3_Click(object? sender, EventArgs e)
+    {
+        string folderPath = GetCurrentDesktopPath(comboBox3);
         OpenFolderInExplorer(folderPath);
     }
 
@@ -1094,6 +1262,17 @@ public partial class MainForm : Form
         return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
     }
 
+    private string GetDesktopPathForListView(ListView listView)
+    {
+        if (listView == listView1)
+            return GetCurrentDesktopPath(comboBox1);
+        if (listView == listView2)
+            return GetCurrentDesktopPath(comboBox2);
+        if (listView == listView3)
+            return GetCurrentDesktopPath(comboBox3);
+        return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+    }
+
     private class UserProfileItem
     {
         public string UserName { get; }
@@ -1130,6 +1309,7 @@ public partial class MainForm : Form
         {
             desktopWatcher?.Dispose();
             commonDesktopWatcher?.Dispose();
+            thirdDesktopWatcher?.Dispose();
         }
         base.Dispose(disposing);
     }
