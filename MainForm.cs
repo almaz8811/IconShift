@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
@@ -31,6 +32,7 @@ public partial class MainForm : Form
     private System.Windows.Forms.Timer dragOverlayTimer;
     private Bitmap? dragOverlayBitmap;
     private Point dragOverlayHotspot;
+    private ListView? dragSourceListView;
 
     [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
@@ -345,6 +347,7 @@ public partial class MainForm : Form
         // Настройка ListView1 (левая панель - рабочий стол)
         listView1.View = View.LargeIcon;
         listView1.FullRowSelect = true;
+        listView1.MultiSelect = true;
         listView1.LargeImageList = imageList1;
         listView1.AllowDrop = true;
         listView1.ItemDrag += ListView1_ItemDrag;
@@ -354,6 +357,7 @@ public partial class MainForm : Form
         // Настройка ListView2 (правая панель - общие ярлыки)
         listView2.View = View.LargeIcon;
         listView2.FullRowSelect = true;
+        listView2.MultiSelect = true;
         listView2.LargeImageList = imageList2;
         listView2.AllowDrop = true;
         listView2.ItemDrag += ListView2_ItemDrag;
@@ -363,11 +367,16 @@ public partial class MainForm : Form
         // Настройка ListView3 (третья панель)
         listView3.View = View.LargeIcon;
         listView3.FullRowSelect = true;
+        listView3.MultiSelect = true;
         listView3.LargeImageList = imageList3;
         listView3.AllowDrop = true;
         listView3.ItemDrag += ListView3_ItemDrag;
         listView3.DragEnter += ListView3_DragEnter;
         listView3.DragDrop += ListView3_DragDrop;
+
+        EnableDoubleBuffering(listView1);
+        EnableDoubleBuffering(listView2);
+        EnableDoubleBuffering(listView3);
 
         // Настройка формы
         Text = "IconShift - Рабочий стол";
@@ -447,6 +456,54 @@ public partial class MainForm : Form
         WindowState = FormWindowState.Maximized;
     }
 
+    private void EnableDoubleBuffering(ListView listView)
+    {
+        PropertyInfo? property = typeof(Control).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (property != null)
+        {
+            property.SetValue(listView, true, null);
+        }
+    }
+
+    private void StartListViewItemDrag(object? sender, ItemDragEventArgs e)
+    {
+        if (sender is ListView listView && e.Item is ListViewItem item)
+        {
+            var itemsToDrag = listView.SelectedItems.Cast<ListViewItem>()
+                .Where(i => i.Tag is FileInfo || i.Tag is DirectoryInfo)
+                .ToArray();
+
+            if (itemsToDrag.Length == 0)
+                return;
+
+            if (!itemsToDrag.Contains(item))
+                itemsToDrag = new[] { item };
+
+            string[] pathsToDrag = itemsToDrag
+                .Select(i => i.Tag is FileInfo fi ? fi.FullName : ((DirectoryInfo)i.Tag).FullName)
+                .ToArray();
+
+            var dataObject = new DataObject();
+            dataObject.SetData(DataFormats.FileDrop, pathsToDrag);
+            dataObject.SetData(DataFormats.StringFormat, string.Join("\r\n", pathsToDrag));
+
+            dragSourceListView = listView;
+            StartDragOverlay(listView, item, dataObject);
+            listView.GiveFeedback += ListView_GiveFeedback;
+
+            try
+            {
+                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
+            }
+            finally
+            {
+                listView.GiveFeedback -= ListView_GiveFeedback;
+                EndDragOverlay();
+                dragSourceListView = null;
+            }
+        }
+    }
+
     private void MainForm_Resize(object? sender, EventArgs e)
     {
         // Адаптируем размеры панелей при изменении размера окна
@@ -500,49 +557,17 @@ public partial class MainForm : Form
 
     private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
-        {
-            var dataObject = new DataObject();
-            dataObject.SetData(typeof(ListViewItem).FullName!, item);
-            StartDragOverlay(listView, item, dataObject);
-            listView.GiveFeedback += ListView_GiveFeedback;
-
-            try
-            {
-                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
-            }
-            finally
-            {
-                listView.GiveFeedback -= ListView_GiveFeedback;
-                EndDragOverlay();
-            }
-        }
+        StartListViewItemDrag(sender, e);
     }
 
     private void ListView2_ItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
-        {
-            var dataObject = new DataObject();
-            dataObject.SetData(typeof(ListViewItem).FullName!, item);
-            StartDragOverlay(listView, item, dataObject);
-            listView.GiveFeedback += ListView_GiveFeedback;
-
-            try
-            {
-                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
-            }
-            finally
-            {
-                listView.GiveFeedback -= ListView_GiveFeedback;
-                EndDragOverlay();
-            }
-        }
+        StartListViewItemDrag(sender, e);
     }
 
     private void ListView1_DragEnter(object? sender, DragEventArgs e)
     {
-        if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem)
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
         {
             e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
         }
@@ -554,7 +579,7 @@ public partial class MainForm : Form
 
     private void ListView2_DragEnter(object? sender, DragEventArgs e)
     {
-        if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem)
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
         {
             e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
         }
@@ -576,28 +601,12 @@ public partial class MainForm : Form
 
     private void ListView3_ItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (sender is ListView listView && e.Item is ListViewItem item && (item.Tag is FileInfo || item.Tag is DirectoryInfo))
-        {
-            var dataObject = new DataObject();
-            dataObject.SetData(typeof(ListViewItem).FullName!, item);
-            StartDragOverlay(listView, item, dataObject);
-            listView.GiveFeedback += ListView_GiveFeedback;
-
-            try
-            {
-                DoDragDrop(dataObject, DragDropEffects.Move | DragDropEffects.Copy);
-            }
-            finally
-            {
-                listView.GiveFeedback -= ListView_GiveFeedback;
-                EndDragOverlay();
-            }
-        }
+        StartListViewItemDrag(sender, e);
     }
 
     private void ListView3_DragEnter(object? sender, DragEventArgs e)
     {
-        if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem)
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
         {
             e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
         }
@@ -614,44 +623,44 @@ public partial class MainForm : Form
 
     private void HandleDragDrop(DragEventArgs e, ListView targetListView, string targetPath)
     {
-        ListViewItem? draggedItem = null;
         ListView? sourceListView = null;
-        object? tag = null;
-        string? sourceFilePath = null;
-        string? targetFilePath = null;
+        string[] draggedPaths = Array.Empty<string>();
         
         try
         {
-            if (e.Data?.GetData(typeof(ListViewItem)) is ListViewItem item)
+            if (e.Data?.GetData(DataFormats.FileDrop) is string[] fileDropPaths)
             {
-                draggedItem = item;
-                sourceListView = item.ListView;
+                draggedPaths = fileDropPaths;
+            }
+            else if (e.Data?.GetData(typeof(string[])) is string[] paths)
+            {
+                draggedPaths = paths;
+            }
 
-                // Если элемент был отпущен в той же панели, ничего не делаем
-                if (sourceListView == targetListView)
-                {
-                    return;
-                }
-                
-                // Получаем информацию о перетаскиваемом элементе
-                string itemName = item.Text;
-                tag = item.Tag;
-                
-                sourceFilePath = tag switch
-                {
-                    FileInfo fi => fi.FullName,
-                    DirectoryInfo di => di.FullName,
-                    _ => null
-                };
+            if (draggedPaths.Length == 0)
+                return;
 
+            sourceListView = dragSourceListView;
+
+            if (sourceListView == null)
+                return;
+
+            if (sourceListView == targetListView)
+                return;
+
+            string sourcePath = GetDesktopPathForListView(sourceListView);
+
+            foreach (var sourceFilePath in draggedPaths)
+            {
                 if (string.IsNullOrEmpty(sourceFilePath))
-                {
-                    return;
-                }
+                    continue;
 
-                targetFilePath = Path.Combine(targetPath, itemName);
+                if (!File.Exists(sourceFilePath) && !Directory.Exists(sourceFilePath))
+                    continue;
 
-                // Если файл уже существует в целевой папке, спрашиваем пользователя
+                string itemName = Path.GetFileName(sourceFilePath);
+                string targetFilePath = Path.Combine(targetPath, itemName);
+
                 if (File.Exists(targetFilePath) || Directory.Exists(targetFilePath))
                 {
                     DialogResult result = MessageBox.Show(
@@ -659,101 +668,70 @@ public partial class MainForm : Form
                         "Подтверждение",
                         MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning);
-                    
+
                     if (result == DialogResult.Cancel)
-                    {
                         return;
-                    }
-                    
+
                     if (result == DialogResult.No)
-                    {
-                        // Пропускаем этот файл, но продолжаем перенос остальных
-                        return;
-                    }
-                    
-                    // Удаляем существующий файл перед перемещением
+                        continue;
+
                     if (File.Exists(targetFilePath))
-                    {
                         File.Delete(targetFilePath);
-                    }
                     else if (Directory.Exists(targetFilePath))
-                    {
                         Directory.Delete(targetFilePath, true);
-                    }
                 }
 
-                // Перемещаем файл
-                if (tag is FileInfo)
-                {
-                    File.Move(sourceFilePath, targetFilePath);
-                }
-                else if (tag is DirectoryInfo)
-                {
-                    Directory.Move(sourceFilePath, targetFilePath);
-                }
+                MoveFileOrDirectory(sourceFilePath, targetFilePath);
+            }
 
-                // Обновляем интерфейс
-                item.Remove();
-                RefreshListView(targetListView, targetPath);
-                if (sourceListView != null)
-                {
-                    string sourcePath = GetDesktopPathForListView(sourceListView);
-                    RefreshListView(sourceListView, sourcePath);
-                }
+            RefreshListViewsWithPath(targetPath);
+
+            if (sourceListView != null)
+            {
+                string sourceDesktopPath = GetDesktopPathForListView(sourceListView);
+                RefreshListViewsWithPath(sourceDesktopPath);
             }
         }
         catch (UnauthorizedAccessException ex)
         {
-            // Обработка ошибки доступа при перемещении файлов из системных папок
-            if (draggedItem != null && tag != null && sourceFilePath != null && targetFilePath != null)
+            if (draggedPaths.Length > 0)
             {
-                DialogResult result = MessageBox.Show(
-                    $"Ошибка доступа при перемещении файла: {ex.Message}\n\n" +
-                    "Это может быть связано с тем, что файл находится в системной папке, требующей прав администратора.\n\n" +
-                    "Попробовать скопировать файл и удалить исходный?",
-                    "IconShift - Ошибка доступа",
-                    MessageBoxButtons.YesNoCancel,
-                    MessageBoxIcon.Warning);
-                
-                if (result == DialogResult.Yes)
+                string sourceDesktopPath = GetDesktopPathForListView(sourceListView!);
+                try
                 {
-                    try
+                    foreach (var sourceFilePath in draggedPaths)
                     {
-                        // Копируем файл
-                        if (tag is FileInfo fi)
+                        if (string.IsNullOrEmpty(sourceFilePath))
+                            continue;
+
+                        if (!File.Exists(sourceFilePath) && !Directory.Exists(sourceFilePath))
+                            continue;
+
+                        string itemName = Path.GetFileName(sourceFilePath);
+                        string targetFilePath = Path.Combine(targetPath, itemName);
+
+                        if (File.Exists(sourceFilePath))
                         {
-                            File.Copy(fi.FullName, targetFilePath, true);
-                        }
-                        else if (tag is DirectoryInfo di)
-                        {
-                            // Для папок используем рекурсивное копирование
-                            CopyDirectory(di.FullName, targetFilePath);
-                        }
-                        
-                        // Удаляем исходный файл
-                        if (tag is FileInfo)
-                        {
+                            File.Copy(sourceFilePath, targetFilePath, true);
                             File.Delete(sourceFilePath);
                         }
-                        else if (tag is DirectoryInfo)
+                        else if (Directory.Exists(sourceFilePath))
                         {
+                            CopyDirectory(sourceFilePath, targetFilePath);
                             Directory.Delete(sourceFilePath, true);
                         }
-                        
-                        // Обновляем интерфейс
-                        draggedItem.Remove();
-                        RefreshListView(targetListView, targetPath);
-                        if (sourceListView != null)
-                        {
-                            string sourcePath = GetDesktopPathForListView(sourceListView);
-                            RefreshListView(sourceListView, sourcePath);
-                        }
                     }
-                    catch (Exception copyEx)
+
+                    RefreshListViewsWithPath(targetPath);
+                    if (sourceListView != null)
                     {
-                        MessageBox.Show($"Ошибка при копировании файла: {copyEx.Message}", 
-                            "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        RefreshListViewsWithPath(sourceDesktopPath);
                     }
+                }
+                catch (Exception copyEx)
+                {
+                    MessageBox.Show($"Ошибка при копировании файла: {copyEx.Message}", 
+                        "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -782,58 +760,93 @@ public partial class MainForm : Form
         }
     }
 
+    private void MoveFileOrDirectory(string sourcePath, string targetPath)
+    {
+        if (File.Exists(sourcePath))
+        {
+            try
+            {
+                File.Move(sourcePath, targetPath);
+            }
+            catch (IOException)
+            {
+                File.Copy(sourcePath, targetPath, true);
+                File.Delete(sourcePath);
+            }
+        }
+        else if (Directory.Exists(sourcePath))
+        {
+            try
+            {
+                Directory.Move(sourcePath, targetPath);
+            }
+            catch (IOException)
+            {
+                CopyDirectory(sourcePath, targetPath);
+                Directory.Delete(sourcePath, true);
+            }
+        }
+        else
+        {
+            throw new FileNotFoundException("Источник не найден", sourcePath);
+        }
+    }
+
     private void RefreshListView(ListView listView, string folderPath)
     {
-        listView.Items.Clear();
+        ImageList imageList;
+        if (listView == listView1)
+            imageList = imageList1;
+        else if (listView == listView2)
+            imageList = imageList2;
+        else
+            imageList = imageList3;
+
+        var pathToIconIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var newItems = new List<ListViewItem>();
+
+        if (listView.Tag is Dictionary<string, int> existingTag)
+        {
+            foreach (var kvp in existingTag)
+            {
+                pathToIconIndex[kvp.Key] = kvp.Value;
+            }
+        }
 
         try
         {
             DirectoryInfo dir = new DirectoryInfo(folderPath);
-            var items = new List<ListViewItem>();
 
-            // Получаем нужный ImageList для ListView
-            ImageList imageList;
-            if (listView == listView1)
-                imageList = imageList1;
-            else if (listView == listView2)
-                imageList = imageList2;
-            else
-                imageList = imageList3;
-
-            // Сначала добавляем папки
             foreach (var directory in dir.EnumerateDirectories())
             {
-                var listItem = CreateListViewItem(directory, imageList);
+                var listItem = CreateListViewItem(directory, imageList, pathToIconIndex);
                 if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
+                    newItems.Add(listItem);
             }
 
-            // Потом добавляем файлы
             foreach (var file in dir.EnumerateFiles())
             {
-                var listItem = CreateListViewItem(file, imageList);
+                var listItem = CreateListViewItem(file, imageList, pathToIconIndex);
                 if (listItem != null)
-                {
-                    items.Add(listItem);
-                }
+                    newItems.Add(listItem);
             }
 
-            // Сортируем: сначала папки, потом файлы, по алфавиту внутри каждой группы
-            items.Sort((a, b) =>
+            newItems.Sort((a, b) =>
             {
                 bool aIsDir = a.Tag is DirectoryInfo;
                 bool bIsDir = b.Tag is DirectoryInfo;
-
                 if (aIsDir && !bIsDir) return -1;
                 if (!aIsDir && bIsDir) return 1;
                 return string.Compare(a.Text, b.Text, StringComparison.OrdinalIgnoreCase);
             });
 
-            listView.Items.AddRange(items.ToArray());
+            listView.BeginUpdate();
+            listView.Items.Clear();
+            listView.Items.AddRange(newItems.ToArray());
+            listView.EndUpdate();
 
-            // Обновляем счётчик
+            listView.Tag = pathToIconIndex;
+
             Label label;
             if (listView == listView1)
                 label = lblCount1;
@@ -841,7 +854,6 @@ public partial class MainForm : Form
                 label = lblCount2;
             else
                 label = lblCount3;
-
             UpdateItemCount(label, listView, folderPath);
         }
         catch (Exception ex)
@@ -869,14 +881,25 @@ public partial class MainForm : Form
         RefreshListView(listView3, thirdDesktopPath);
     }
 
-    private ListViewItem? CreateListViewItem(FileInfo file, ImageList imageList)
+    private ListViewItem? CreateListViewItem(FileInfo file, ImageList imageList, Dictionary<string, int> pathToIconIndex)
     {
         try
         {
             string displayName = file.Name;
+            string iconKey = file.FullName.ToLowerInvariant();
+
+            if (pathToIconIndex.TryGetValue(iconKey, out int existingIndex))
+            {
+                return new ListViewItem
+                {
+                    Text = displayName,
+                    ImageIndex = existingIndex,
+                    Tag = file
+                };
+            }
+
             Icon? icon = null;
 
-            // Если это .lnk файл, получаем иконку целевого файла
             if (file.Extension.ToLower() == ".lnk")
             {
                 string targetPath = GetLnkTargetPath(file.FullName);
@@ -886,31 +909,26 @@ public partial class MainForm : Form
                 }
             }
 
-            // Если не удалось получить иконку ярлыка, используем иконку самого файла
             if (icon == null && File.Exists(file.FullName))
             {
                 icon = Icon.ExtractAssociatedIcon(file.FullName);
             }
 
-            // Если иконка не найдена, используем иконку по умолчанию
             if (icon == null)
             {
                 icon = SystemIcons.Application;
             }
 
-            // Добавляем иконку в ImageList
             int iconIndex = imageList.Images.Count;
             imageList.Images.Add(icon!);
+            pathToIconIndex[iconKey] = iconIndex;
 
-            // Создаем элемент ListView
-            var listItem = new ListViewItem
+            return new ListViewItem
             {
                 Text = displayName,
                 ImageIndex = iconIndex,
                 Tag = file
             };
-
-            return listItem;
         }
         catch
         {
@@ -918,24 +936,34 @@ public partial class MainForm : Form
         }
     }
 
-    private ListViewItem? CreateListViewItem(DirectoryInfo directory, ImageList imageList)
+    private ListViewItem? CreateListViewItem(DirectoryInfo directory, ImageList imageList, Dictionary<string, int> pathToIconIndex)
     {
         try
         {
             string displayName = directory.Name;
-            Icon? icon = GetSystemIcon(directory.FullName, true) ?? SystemIcons.Application;
+            string iconKey = directory.FullName.ToLowerInvariant();
 
+            if (pathToIconIndex.TryGetValue(iconKey, out int existingIndex))
+            {
+                return new ListViewItem
+                {
+                    Text = displayName,
+                    ImageIndex = existingIndex,
+                    Tag = directory
+                };
+            }
+
+            Icon? icon = GetSystemIcon(directory.FullName, true) ?? SystemIcons.Application;
             int iconIndex = imageList.Images.Count;
             imageList.Images.Add(icon);
+            pathToIconIndex[iconKey] = iconIndex;
 
-            var listItem = new ListViewItem
+            return new ListViewItem
             {
                 Text = displayName,
                 ImageIndex = iconIndex,
                 Tag = directory
             };
-
-            return listItem;
         }
         catch
         {
@@ -963,10 +991,10 @@ public partial class MainForm : Form
             dynamic shellObj = shell;
             var shortcut = shellObj.CreateShortcut(lnkPath);
             string targetPath = shortcut.TargetPath;
-            
-            // Освобождаем COM-объекты
+
+            Marshal.ReleaseComObject(shortcut);
             Marshal.ReleaseComObject(shell);
-            
+
             return targetPath;
         }
         catch
@@ -1301,6 +1329,18 @@ public partial class MainForm : Form
         {
             RefreshListView(listView, folderPath);
         }
+    }
+
+    private void RefreshListViewsWithPath(string folderPath)
+    {
+        if (GetDesktopPathForListView(listView1) == folderPath)
+            RefreshListView(listView1, folderPath);
+
+        if (GetDesktopPathForListView(listView2) == folderPath)
+            RefreshListView(listView2, folderPath);
+
+        if (GetDesktopPathForListView(listView3) == folderPath)
+            RefreshListView(listView3, folderPath);
     }
 
     protected override void Dispose(bool disposing)
