@@ -2,37 +2,53 @@ using System.Drawing;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace IconShift;
 
-public partial class MainForm : Form
+public class MainForm : Form
 {
-    private ComboBox comboBox1;
-    private ComboBox comboBox2;
-    private ComboBox comboBox3;
-    private Button btnOpenFolder1;
-    private Button btnOpenFolder2;
-    private Button btnOpenFolder3;
-    private Label lblCount1;
-    private Label lblCount2;
-    private Label lblCount3;
-    private ListView listView1;
-    private ImageList imageList1;
-    private ListView listView2;
-    private ImageList imageList2;
-    private ListView listView3;
-    private ImageList imageList3;
-    private FileSystemWatcher desktopWatcher;
-    private FileSystemWatcher commonDesktopWatcher;
-    private FileSystemWatcher thirdDesktopWatcher;
-    private Form? dragOverlayForm;
-    private System.Windows.Forms.Timer dragOverlayTimer;
+    private ComboBox comboBox1 = null!;
+    private ComboBox comboBox2 = null!;
+    private ComboBox comboBox3 = null!;
+    private Button btnOpenFolder1 = null!;
+    private Button btnOpenFolder2 = null!;
+    private Button btnOpenFolder3 = null!;
+    private Label lblCount1 = null!;
+    private Label lblCount2 = null!;
+    private Label lblCount3 = null!;
+    private ListView listView1 = null!;
+    private ImageList imageList1 = null!;
+    private ListView listView2 = null!;
+    private ImageList imageList2 = null!;
+    private ListView listView3 = null!;
+    private ImageList imageList3 = null!;
+    private FileSystemWatcher? desktopWatcher;
+    private FileSystemWatcher? commonDesktopWatcher;
+    private FileSystemWatcher? thirdDesktopWatcher;
+    private LayeredDragWindow? dragOverlayForm;
+    private System.Windows.Forms.Timer dragOverlayTimer = null!;
+    private System.Windows.Forms.Timer refreshDebounceTimer1 = null!;
+    private System.Windows.Forms.Timer refreshDebounceTimer2 = null!;
+    private System.Windows.Forms.Timer refreshDebounceTimer3 = null!;
     private Bitmap? dragOverlayBitmap;
     private Point dragOverlayHotspot;
     private ListView? dragSourceListView;
+    private ListView? dropHighlightListView;
+    private Color dropHighlightOriginalBackColor;
+    private bool suppressComboLoad;
+    private string? lastPath1;
+    private string? lastPath2;
+    private string? lastPath3;
+
+    private const int WS_EX_LAYERED = 0x00080000;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int ULW_ALPHA = 0x00000002;
+    private const byte AC_SRC_OVER = 0x00;
+    private const byte AC_SRC_ALPHA = 0x01;
 
     [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
@@ -48,6 +64,33 @@ public partial class MainForm : Form
     [DllImport("gdi32.dll", SetLastError = true)]
     private static extern bool DeleteObject(IntPtr hObject);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateLayeredWindow(
+        IntPtr hwnd,
+        IntPtr hdcDst,
+        ref POINT pptDst,
+        ref SIZE psize,
+        IntPtr hdcSrc,
+        ref POINT pptSrc,
+        int crKey,
+        ref BLENDFUNCTION pblend,
+        int dwFlags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct SIZE
     {
@@ -60,6 +103,15 @@ public partial class MainForm : Form
     {
         public int x;
         public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct BLENDFUNCTION
+    {
+        public byte BlendOp;
+        public byte BlendFlags;
+        public byte SourceConstantAlpha;
+        public byte AlphaFormat;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -105,6 +157,119 @@ public partial class MainForm : Form
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
 
+    /// <summary>
+    /// Topmost layered window with per-pixel alpha — Explorer-style drag ghost.
+    /// Caches the HBITMAP so the ghost can track the cursor at ~60 FPS cheaply.
+    /// </summary>
+    private sealed class LayeredDragWindow : Form
+    {
+        private IntPtr cachedHBitmap = IntPtr.Zero;
+        private int bitmapWidth;
+        private int bitmapHeight;
+        private byte currentOpacity = 255;
+
+        public LayeredDragWindow()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            ShowIcon = false;
+        }
+
+        protected override bool ShowWithoutActivation => true;
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        public void SetBitmap(Bitmap bitmap, byte opacity = 255)
+        {
+            FreeCachedBitmap();
+            cachedHBitmap = bitmap.GetHbitmap(Color.FromArgb(0));
+            bitmapWidth = bitmap.Width;
+            bitmapHeight = bitmap.Height;
+            currentOpacity = opacity;
+            Size = new Size(bitmapWidth, bitmapHeight);
+            Present(Left, Top);
+        }
+
+        public void MoveTo(int x, int y)
+        {
+            if (cachedHBitmap == IntPtr.Zero)
+            {
+                Location = new Point(x, y);
+                return;
+            }
+
+            Present(x, y);
+        }
+
+        private void Present(int x, int y)
+        {
+            if (cachedHBitmap == IntPtr.Zero)
+                return;
+
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr oldBitmap = SelectObject(memDc, cachedHBitmap);
+
+            try
+            {
+                SIZE size = new SIZE { cx = bitmapWidth, cy = bitmapHeight };
+                POINT pointSource = new POINT { x = 0, y = 0 };
+                POINT topPos = new POINT { x = x, y = y };
+                BLENDFUNCTION blend = new BLENDFUNCTION
+                {
+                    BlendOp = AC_SRC_OVER,
+                    BlendFlags = 0,
+                    SourceConstantAlpha = currentOpacity,
+                    AlphaFormat = AC_SRC_ALPHA
+                };
+
+                UpdateLayeredWindow(
+                    Handle,
+                    screenDc,
+                    ref topPos,
+                    ref size,
+                    memDc,
+                    ref pointSource,
+                    0,
+                    ref blend,
+                    ULW_ALPHA);
+
+                Location = new Point(x, y);
+            }
+            finally
+            {
+                SelectObject(memDc, oldBitmap);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+        }
+
+        private void FreeCachedBitmap()
+        {
+            if (cachedHBitmap != IntPtr.Zero)
+            {
+                DeleteObject(cachedHBitmap);
+                cachedHBitmap = IntPtr.Zero;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            FreeCachedBitmap();
+            base.Dispose(disposing);
+        }
+    }
+
     private static Icon? GetSystemIcon(string path, bool isDirectory)
     {
         var shinfo = new SHFILEINFO();
@@ -126,6 +291,7 @@ public partial class MainForm : Form
     {
         InitializeComponent();
         InitializeDragDropOverlay();
+        InitializeRefreshDebounceTimers();
         InitializeFileSystemWatchers();
         LoadDesktopFiles();
         LoadCommonDesktopFiles();
@@ -135,92 +301,231 @@ public partial class MainForm : Form
     private void InitializeDragDropOverlay()
     {
         dragOverlayTimer = new System.Windows.Forms.Timer();
-        dragOverlayTimer.Interval = 20;
+        dragOverlayTimer.Interval = 16; // ~60 FPS cursor tracking
         dragOverlayTimer.Tick += DragOverlayTimer_Tick;
+    }
+
+    private void InitializeRefreshDebounceTimers()
+    {
+        refreshDebounceTimer1 = CreateDebounceTimer(() => RefreshListView(listView1, GetDesktopPathForListView(listView1)));
+        refreshDebounceTimer2 = CreateDebounceTimer(() => RefreshListView(listView2, GetDesktopPathForListView(listView2)));
+        refreshDebounceTimer3 = CreateDebounceTimer(() => RefreshListView(listView3, GetDesktopPathForListView(listView3)));
+    }
+
+    private static System.Windows.Forms.Timer CreateDebounceTimer(Action action)
+    {
+        var timer = new System.Windows.Forms.Timer { Interval = 200 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            action();
+        };
+        return timer;
     }
 
     private void DragOverlayTimer_Tick(object? sender, EventArgs e)
     {
         if (dragOverlayForm != null && dragOverlayForm.Visible)
-        {
             UpdateDragOverlayPosition();
-        }
     }
 
-    private void StartDragOverlay(ListView sourceListView, ListViewItem item, DataObject dataObject)
+    /// <summary>
+    /// Builds an Explorer-like drag image: stacked icons, count badge, caption for a single item.
+    /// Caption uses the same Font/ForeColor/GDI rendering as the ListView item label.
+    /// </summary>
+    private static Bitmap CreateExplorerStyleDragImage(
+        ListView sourceListView,
+        ListViewItem[] items,
+        out Point hotspot)
     {
-        if (item == null)
+        // Match ListView LargeIcon image size (no upscale → cleaner look).
+        int iconSize = sourceListView.LargeImageList?.ImageSize.Width ?? 32;
+        if (iconSize < 16) iconSize = 32;
+
+        const int stackOffset = 8;
+        const int margin = 10;
+        const int maxStack = 3;
+
+        // Same flags ListView uses for LargeIcon captions (GDI TextRenderer path).
+        const TextFormatFlags labelFlags =
+            TextFormatFlags.HorizontalCenter
+            | TextFormatFlags.Top
+            | TextFormatFlags.WordBreak
+            | TextFormatFlags.EndEllipsis
+            | TextFormatFlags.NoPrefix
+            | TextFormatFlags.TextBoxControl
+            | TextFormatFlags.NoPadding;
+
+        int count = items.Length;
+        int stackCount = Math.Min(count, maxStack);
+        int stackExtra = (stackCount - 1) * stackOffset;
+
+        // Exact same typeface as the shortcut caption in the ListView.
+        using Font font = (Font)sourceListView.Font.Clone();
+        Color textColor = sourceListView.ForeColor;
+        // Fully opaque background required for ClearType (same as ListView solid back color).
+        Color labelBackColor = sourceListView.BackColor.A == 255
+            ? sourceListView.BackColor
+            : Color.White;
+
+        bool showLabel = count == 1;
+        string label = showLabel ? items[0].Text : string.Empty;
+
+        // Width of the caption area under a LargeIcon item (Bounds include icon+text column).
+        int maxLabelWidth = 100;
+        if (showLabel)
         {
-            return;
+            int itemW = items[0].Bounds.Width;
+            maxLabelWidth = itemW > iconSize ? itemW : Math.Max(iconSize + 24, 80);
         }
 
-        dragOverlayBitmap?.Dispose();
+        Size labelSize = showLabel
+            ? TextRenderer.MeasureText(label, font, new Size(maxLabelWidth, int.MaxValue), labelFlags)
+            : Size.Empty;
 
-        int iconSize = 48;
-        int padding = 8;
-        using Font font = SystemFonts.MenuFont;
-        Size textSize = TextRenderer.MeasureText(item.Text, font);
-        int width = iconSize + padding * 3 + Math.Min(textSize.Width, 220);
-        int height = Math.Max(iconSize + padding * 2, textSize.Height + padding * 2);
+        int contentWidth = iconSize + stackExtra;
+        int contentHeight = iconSize + stackExtra;
+        int labelPadX = 4;
+        int labelPadY = 2;
+        int labelBlockWidth = showLabel ? Math.Min(Math.Max(labelSize.Width + labelPadX * 2, maxLabelWidth), maxLabelWidth + labelPadX * 2) : 0;
+        int labelBlockHeight = showLabel ? labelSize.Height + labelPadY * 2 : 0;
+        int gap = showLabel ? 4 : 0;
 
-        dragOverlayBitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-        using (Graphics g = Graphics.FromImage(dragOverlayBitmap))
+        int width = Math.Max(contentWidth, labelBlockWidth) + margin * 2 + 12;
+        int height = contentHeight + gap + labelBlockHeight + margin * 2 + 12;
+
+        if (count > 1)
         {
+            width = Math.Max(width, contentWidth + margin * 2 + 28);
+            height = Math.Max(height, contentHeight + margin * 2 + 20);
+        }
+
+        var bitmap = new Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (Graphics g = Graphics.FromImage(bitmap))
+        {
+            // No shadows / semi-transparent plates — they spoil ClearType and make text look dirty.
             g.Clear(Color.Transparent);
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.None;
+            g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            using var backgroundBrush = new SolidBrush(Color.FromArgb(220, Color.White));
-            g.FillRectangle(backgroundBrush, 0, 0, width, height);
-            g.DrawRectangle(Pens.LightGray, 0, 0, width - 1, height - 1);
 
-            Image? iconImage = null;
-            if (sourceListView.LargeImageList != null && item.ImageIndex >= 0 && item.ImageIndex < sourceListView.LargeImageList.Images.Count)
+            int stackLeft = margin + (width - margin * 2 - contentWidth) / 2;
+            int stackTop = margin;
+
+            // Icons only (no plates, no dimming, no shadows).
+            g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+            for (int i = stackCount - 1; i >= 0; i--)
             {
-                iconImage = sourceListView.LargeImageList.Images[item.ImageIndex];
+                ListViewItem stackItem = i < items.Length ? items[i] : items[^1];
+
+                Image? iconImage = null;
+                if (sourceListView.LargeImageList != null &&
+                    stackItem.ImageIndex >= 0 &&
+                    stackItem.ImageIndex < sourceListView.LargeImageList.Images.Count)
+                {
+                    iconImage = sourceListView.LargeImageList.Images[stackItem.ImageIndex];
+                }
+
+                if (iconImage == null)
+                    continue;
+
+                int x = stackLeft + i * stackOffset;
+                int y = stackTop + i * stackOffset;
+                g.DrawImage(iconImage, new Rectangle(x, y, iconSize, iconSize));
             }
 
-            if (iconImage != null)
+            if (count > 1)
             {
-                g.DrawImage(iconImage, new Rectangle(padding, padding, iconSize, iconSize));
+                string badgeText = count > 99 ? "99+" : count.ToString();
+                Size badgeTextSize = TextRenderer.MeasureText(badgeText, font);
+                int badgeW = Math.Max(20, badgeTextSize.Width);
+                int badgeH = Math.Max(18, badgeTextSize.Height);
+                int badgeX = Math.Min(stackLeft + contentWidth - badgeW / 2, width - badgeW - 4);
+                int badgeY = Math.Max(stackTop - 4, 2);
+
+                var badgeRect = new Rectangle(badgeX, badgeY, badgeW, badgeH);
+                using (var badgeBrush = new SolidBrush(Color.FromArgb(255, 0, 120, 215)))
+                {
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    g.FillEllipse(badgeBrush, badgeRect);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                }
+
+                TextRenderer.DrawText(
+                    g,
+                    badgeText,
+                    font,
+                    badgeRect,
+                    Color.White,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
             }
 
-            var textRect = new Rectangle(iconSize + padding * 2, padding, width - iconSize - padding * 3, height - padding * 2);
-            TextRenderer.DrawText(g, item.Text, font, textRect, Color.Black, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        }
-
-        dragOverlayHotspot = new Point(padding, padding);
-
-        if (!TryInitializeShellDragImage(dataObject, dragOverlayBitmap, dragOverlayHotspot))
-        {
-            dragOverlayForm = new Form
+            // Caption: opaque ListView-colored plate + GDI text (identical to item label).
+            if (showLabel)
             {
-                FormBorderStyle = FormBorderStyle.None,
-                ShowInTaskbar = false,
-                StartPosition = FormStartPosition.Manual,
-                BackColor = Color.White,
-                TransparencyKey = Color.Empty,
-                AllowTransparency = true,
-                TopMost = true,
-                Size = dragOverlayBitmap.Size,
-                Opacity = 0.85
-            };
+                int labelW = labelBlockWidth;
+                int labelH = labelBlockHeight;
+                int labelX = (width - labelW) / 2;
+                int labelY = stackTop + contentHeight + gap;
 
-            dragOverlayForm.BackgroundImage = dragOverlayBitmap;
-            dragOverlayForm.BackgroundImageLayout = ImageLayout.None;
-            dragOverlayForm.Show();
-            UpdateDragOverlayPosition();
-            dragOverlayTimer.Start();
+                var labelRect = new Rectangle(labelX, labelY, labelW, labelH);
+
+                // Fully opaque solid fill — required for clean ClearType.
+                using (var labelBg = new SolidBrush(Color.FromArgb(255, labelBackColor)))
+                {
+                    g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                    g.FillRectangle(labelBg, labelRect);
+                    g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
+                }
+
+                var textRect = new Rectangle(
+                    labelRect.X + labelPadX,
+                    labelRect.Y + labelPadY,
+                    labelRect.Width - labelPadX * 2,
+                    labelRect.Height - labelPadY * 2);
+
+                TextRenderer.DrawText(g, label, font, textRect, textColor, labelBackColor, labelFlags);
+            }
         }
+
+        hotspot = new Point(margin + 8, margin + 8);
+        return bitmap;
+    }
+
+    private void StartDragOverlay(ListView sourceListView, ListViewItem[] items, DataObject dataObject)
+    {
+        if (items.Length == 0)
+            return;
+
+        EndDragOverlay();
+
+        dragOverlayBitmap = CreateExplorerStyleDragImage(sourceListView, items, out dragOverlayHotspot);
+
+        // Also register with the shell so drops into Explorer get a native drag image when possible.
+        TryInitializeShellDragImage(dataObject, dragOverlayBitmap, dragOverlayHotspot);
+
+        dragOverlayForm = new LayeredDragWindow();
+        // Create handle before SetBitmap so UpdateLayeredWindow works.
+        _ = dragOverlayForm.Handle;
+        // Full opacity so ClearType glyphs stay sharp (no extra alpha blend on the ghost).
+        dragOverlayForm.SetBitmap(dragOverlayBitmap, 255);
+        dragOverlayForm.Show();
+        UpdateDragOverlayPosition();
+        dragOverlayTimer.Start();
     }
 
     private void UpdateDragOverlayPosition()
     {
         if (dragOverlayForm == null)
-        {
             return;
-        }
 
         Point cursorPos = Cursor.Position;
-        dragOverlayForm.Location = new Point(cursorPos.X - dragOverlayHotspot.X, cursorPos.Y - dragOverlayHotspot.Y);
+        int x = cursorPos.X - dragOverlayHotspot.X;
+        int y = cursorPos.Y - dragOverlayHotspot.Y;
+        dragOverlayForm.MoveTo(x, y);
     }
 
     private void EndDragOverlay()
@@ -229,7 +534,7 @@ public partial class MainForm : Form
 
         if (dragOverlayForm != null)
         {
-            dragOverlayForm.Close();
+            dragOverlayForm.Hide();
             dragOverlayForm.Dispose();
             dragOverlayForm = null;
         }
@@ -240,10 +545,13 @@ public partial class MainForm : Form
 
     private bool TryInitializeShellDragImage(DataObject dataObject, Bitmap dragBitmap, Point hotspot)
     {
+        IntPtr hBitmap = IntPtr.Zero;
         try
         {
             var helper = (IDragSourceHelper)new DragDropHelper();
-            IntPtr hBitmap = dragBitmap.GetHbitmap(Color.FromArgb(0));
+            // Shell takes ownership of a copy; we still free our HBITMAP after call when it fails,
+            // but InitializeFromBitmap typically copies — free in finally either way.
+            hBitmap = dragBitmap.GetHbitmap(Color.FromArgb(0));
             var shdi = new SHDRAGIMAGE
             {
                 sizeDragImage = new SIZE { cx = dragBitmap.Width, cy = dragBitmap.Height },
@@ -253,98 +561,109 @@ public partial class MainForm : Form
             };
 
             helper.InitializeFromBitmap(ref shdi, dataObject);
-            DeleteObject(hBitmap);
             return true;
         }
         catch
         {
             return false;
         }
+        finally
+        {
+            if (hBitmap != IntPtr.Zero)
+                DeleteObject(hBitmap);
+        }
     }
 
     private void ListView_GiveFeedback(object? sender, GiveFeedbackEventArgs e)
     {
+        // Keep system Move/Copy/None cursors (Explorer-like) while our ghost image follows the pointer.
         e.UseDefaultCursors = true;
+        UpdateDragOverlayPosition();
     }
+
+    private void SetDropHighlight(ListView? listView)
+    {
+        if (dropHighlightListView == listView)
+            return;
+
+        if (dropHighlightListView != null)
+        {
+            dropHighlightListView.BackColor = dropHighlightOriginalBackColor;
+            dropHighlightListView = null;
+        }
+
+        if (listView != null)
+        {
+            dropHighlightOriginalBackColor = listView.BackColor;
+            listView.BackColor = Color.FromArgb(232, 242, 254); // light Explorer selection blue
+            dropHighlightListView = listView;
+        }
+    }
+
+    private void ClearDropHighlight() => SetDropHighlight(null);
 
     private void InitializeComponent()
     {
-        // Настройка ComboBox для первой панели
         comboBox1 = new ComboBox();
         comboBox1.DropDownStyle = ComboBoxStyle.DropDownList;
         comboBox1.SelectedIndexChanged += ComboBox1_SelectedIndexChanged;
 
-        // Настройка кнопки открытия папки для первой панели
         btnOpenFolder1 = new Button();
         btnOpenFolder1.Text = "📁";
         btnOpenFolder1.Width = 35;
         btnOpenFolder1.Click += BtnOpenFolder1_Click;
 
-        // Настройка ComboBox для второй панели
         comboBox2 = new ComboBox();
         comboBox2.DropDownStyle = ComboBoxStyle.DropDownList;
         comboBox2.SelectedIndexChanged += ComboBox2_SelectedIndexChanged;
 
-        // Настройка кнопки открытия папки для второй панели
         btnOpenFolder2 = new Button();
         btnOpenFolder2.Text = "📁";
         btnOpenFolder2.Width = 35;
         btnOpenFolder2.Click += BtnOpenFolder2_Click;
 
-        // Настройка ComboBox для третьей панели
         comboBox3 = new ComboBox();
         comboBox3.DropDownStyle = ComboBoxStyle.DropDownList;
         comboBox3.SelectedIndexChanged += ComboBox3_SelectedIndexChanged;
 
-        // Настройка кнопки открытия папки для третьей панели
         btnOpenFolder3 = new Button();
         btnOpenFolder3.Text = "📁";
         btnOpenFolder3.Width = 35;
         btnOpenFolder3.Click += BtnOpenFolder3_Click;
 
-        // Настройка Label для счётчика первой панели
         lblCount1 = new Label();
         lblCount1.AutoSize = false;
         lblCount1.TextAlign = ContentAlignment.MiddleLeft;
         lblCount1.Height = 20;
 
-        // Настройка Label для счётчика второй панели
         lblCount2 = new Label();
         lblCount2.AutoSize = false;
         lblCount2.TextAlign = ContentAlignment.MiddleLeft;
         lblCount2.Height = 20;
 
-        // Настройка Label для счётчика третьей панели
         lblCount3 = new Label();
         lblCount3.AutoSize = false;
         lblCount3.TextAlign = ContentAlignment.MiddleLeft;
         lblCount3.Height = 20;
 
-        // Настройка ListView для рабочего стола
         listView1 = new ListView();
         imageList1 = new ImageList();
 
-        // Настройка ListView для общих ярлыков
         listView2 = new ListView();
         imageList2 = new ImageList();
 
-        // Настройка ListView для третьей панели
         listView3 = new ListView();
         imageList3 = new ImageList();
 
-        // Настройка ImageList1
         imageList1.ColorDepth = ColorDepth.Depth32Bit;
         imageList1.ImageSize = new Size(32, 32);
 
-        // Настройка ImageList2
         imageList2.ColorDepth = ColorDepth.Depth32Bit;
         imageList2.ImageSize = new Size(32, 32);
 
-        // Настройка ImageList3
         imageList3.ColorDepth = ColorDepth.Depth32Bit;
         imageList3.ImageSize = new Size(32, 32);
 
-        // Настройка ListView1 (левая панель - рабочий стол)
         listView1.View = View.LargeIcon;
         listView1.FullRowSelect = true;
         listView1.MultiSelect = true;
@@ -352,9 +671,11 @@ public partial class MainForm : Form
         listView1.AllowDrop = true;
         listView1.ItemDrag += ListView1_ItemDrag;
         listView1.DragEnter += ListView1_DragEnter;
+        listView1.DragOver += ListView_DragOver;
+        listView1.DragLeave += ListView_DragLeave;
         listView1.DragDrop += ListView1_DragDrop;
+        listView1.DoubleClick += ListView_DoubleClick;
 
-        // Настройка ListView2 (правая панель - общие ярлыки)
         listView2.View = View.LargeIcon;
         listView2.FullRowSelect = true;
         listView2.MultiSelect = true;
@@ -362,9 +683,11 @@ public partial class MainForm : Form
         listView2.AllowDrop = true;
         listView2.ItemDrag += ListView2_ItemDrag;
         listView2.DragEnter += ListView2_DragEnter;
+        listView2.DragOver += ListView_DragOver;
+        listView2.DragLeave += ListView_DragLeave;
         listView2.DragDrop += ListView2_DragDrop;
+        listView2.DoubleClick += ListView_DoubleClick;
 
-        // Настройка ListView3 (третья панель)
         listView3.View = View.LargeIcon;
         listView3.FullRowSelect = true;
         listView3.MultiSelect = true;
@@ -372,27 +695,28 @@ public partial class MainForm : Form
         listView3.AllowDrop = true;
         listView3.ItemDrag += ListView3_ItemDrag;
         listView3.DragEnter += ListView3_DragEnter;
+        listView3.DragOver += ListView_DragOver;
+        listView3.DragLeave += ListView_DragLeave;
         listView3.DragDrop += ListView3_DragDrop;
+        listView3.DoubleClick += ListView_DoubleClick;
 
         EnableDoubleBuffering(listView1);
         EnableDoubleBuffering(listView2);
         EnableDoubleBuffering(listView3);
 
-        // Настройка формы
         Text = "IconShift - Рабочий стол";
 
-        // Устанавливаем размер формы - 85% от экрана
         int screenWidth = Screen.PrimaryScreen!.Bounds.Width;
         int screenHeight = Screen.PrimaryScreen!.Bounds.Height;
         ClientSize = new Size((int)(screenWidth * 0.85), (int)(screenHeight * 0.85));
 
-        // Регистрируем обработчик изменения размера окна
         Resize += MainForm_Resize;
 
-        // Заполняем выпадающие списки пользователями
+        // Avoid triple refresh from SelectedIndexChanged during initial populate.
+        suppressComboLoad = true;
         PopulateUserComboBoxes();
+        suppressComboLoad = false;
 
-        // Устанавливаем размеры панелей для растягивания на всё окно
         int panelSpacing = 20;
         int topMargin = 10;
         int controlAreaHeight = 25;
@@ -465,6 +789,49 @@ public partial class MainForm : Form
         }
     }
 
+    private static string NormalizePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return string.Empty;
+
+        try
+        {
+            string full = Path.GetFullPath(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            return full;
+        }
+        catch
+        {
+            return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+    }
+
+    private static bool PathsEqual(string? pathA, string? pathB)
+    {
+        if (string.IsNullOrEmpty(pathA) || string.IsNullOrEmpty(pathB))
+            return false;
+
+        return string.Equals(NormalizePath(pathA), NormalizePath(pathB), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True if candidate is the same as root or is nested under root.
+    /// </summary>
+    private static bool IsSameOrUnder(string root, string candidate)
+    {
+        string nRoot = NormalizePath(root);
+        string nCandidate = NormalizePath(candidate);
+        if (string.IsNullOrEmpty(nRoot) || string.IsNullOrEmpty(nCandidate))
+            return false;
+
+        if (string.Equals(nRoot, nCandidate, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string prefix = nRoot.EndsWith(Path.DirectorySeparatorChar)
+            ? nRoot
+            : nRoot + Path.DirectorySeparatorChar;
+        return nCandidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void StartListViewItemDrag(object? sender, ItemDragEventArgs e)
     {
         if (sender is ListView listView && e.Item is ListViewItem item)
@@ -474,22 +841,47 @@ public partial class MainForm : Form
                 .ToArray();
 
             if (itemsToDrag.Length == 0)
-                return;
-
-            if (!itemsToDrag.Contains(item))
+            {
+                if (item.Tag is FileInfo or DirectoryInfo)
+                    itemsToDrag = new[] { item };
+                else
+                    return;
+            }
+            else if (!itemsToDrag.Contains(item) && item.Tag is FileInfo or DirectoryInfo)
+            {
                 itemsToDrag = new[] { item };
+            }
+            else if (!itemsToDrag.Contains(item))
+            {
+                return;
+            }
 
             string[] pathsToDrag = itemsToDrag
-                .Select(i => i.Tag is FileInfo fi ? fi.FullName : ((DirectoryInfo)i.Tag).FullName)
+                .Select(i =>
+                {
+                    if (i.Tag is FileInfo fi)
+                        return fi.FullName;
+                    if (i.Tag is DirectoryInfo di)
+                        return di.FullName;
+                    return null;
+                })
+                .Where(p => !string.IsNullOrEmpty(p))
+                .Cast<string>()
                 .ToArray();
+
+            if (pathsToDrag.Length == 0)
+                return;
 
             var dataObject = new DataObject();
             dataObject.SetData(DataFormats.FileDrop, pathsToDrag);
             dataObject.SetData(DataFormats.StringFormat, string.Join("\r\n", pathsToDrag));
 
             dragSourceListView = listView;
-            StartDragOverlay(listView, item, dataObject);
+            StartDragOverlay(listView, itemsToDrag, dataObject);
             listView.GiveFeedback += ListView_GiveFeedback;
+            // Also track on form for smoother feedback during cross-control drag.
+            GiveFeedback += ListView_GiveFeedback;
+            QueryContinueDrag += MainForm_QueryContinueDrag;
 
             try
             {
@@ -498,15 +890,24 @@ public partial class MainForm : Form
             finally
             {
                 listView.GiveFeedback -= ListView_GiveFeedback;
+                GiveFeedback -= ListView_GiveFeedback;
+                QueryContinueDrag -= MainForm_QueryContinueDrag;
                 EndDragOverlay();
+                ClearDropHighlight();
                 dragSourceListView = null;
             }
         }
     }
 
+    private void MainForm_QueryContinueDrag(object? sender, QueryContinueDragEventArgs e)
+    {
+        // Keep ghost glued to the cursor even when feedback events are sparse.
+        if (e.Action != DragAction.Cancel && e.Action != DragAction.Drop)
+            UpdateDragOverlayPosition();
+    }
+
     private void MainForm_Resize(object? sender, EventArgs e)
     {
-        // Адаптируем размеры панелей при изменении размера окна
         int panelSpacing = 20;
         int topMargin = 10;
         int controlAreaHeight = 25;
@@ -555,77 +956,96 @@ public partial class MainForm : Form
         listView3.Height = labelTop - panelTop - labelSpacing;
     }
 
-    private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e)
-    {
-        StartListViewItemDrag(sender, e);
-    }
+    private void ListView1_ItemDrag(object? sender, ItemDragEventArgs e) => StartListViewItemDrag(sender, e);
+    private void ListView2_ItemDrag(object? sender, ItemDragEventArgs e) => StartListViewItemDrag(sender, e);
+    private void ListView3_ItemDrag(object? sender, ItemDragEventArgs e) => StartListViewItemDrag(sender, e);
 
-    private void ListView2_ItemDrag(object? sender, ItemDragEventArgs e)
+    private void SetDragEffect(DragEventArgs e, ListView? target)
     {
-        StartListViewItemDrag(sender, e);
-    }
-
-    private void ListView1_DragEnter(object? sender, DragEventArgs e)
-    {
-        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true ||
+            e.Data?.GetDataPresent(typeof(string[])) == true)
         {
-            e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
+            bool copy = (e.KeyState & 8) == 8; // Ctrl = copy (Explorer)
+            e.Effect = copy ? DragDropEffects.Copy : DragDropEffects.Move;
+            if (target != null)
+                SetDropHighlight(target);
         }
         else
         {
             e.Effect = DragDropEffects.None;
+            if (target != null && dropHighlightListView == target)
+                ClearDropHighlight();
         }
+
+        UpdateDragOverlayPosition();
     }
 
-    private void ListView2_DragEnter(object? sender, DragEventArgs e)
+    private void ListView1_DragEnter(object? sender, DragEventArgs e) => SetDragEffect(e, listView1);
+    private void ListView2_DragEnter(object? sender, DragEventArgs e) => SetDragEffect(e, listView2);
+    private void ListView3_DragEnter(object? sender, DragEventArgs e) => SetDragEffect(e, listView3);
+    private void ListView_DragOver(object? sender, DragEventArgs e) =>
+        SetDragEffect(e, sender as ListView);
+
+    private void ListView_DragLeave(object? sender, EventArgs e)
     {
-        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
-        {
-            e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
-        }
-        else
-        {
-            e.Effect = DragDropEffects.None;
-        }
+        if (sender is ListView lv && dropHighlightListView == lv)
+            ClearDropHighlight();
     }
 
     private void ListView1_DragDrop(object? sender, DragEventArgs e)
     {
+        ClearDropHighlight();
         HandleDragDrop(e, listView1, GetCurrentDesktopPath(comboBox1));
     }
 
     private void ListView2_DragDrop(object? sender, DragEventArgs e)
     {
+        ClearDropHighlight();
         HandleDragDrop(e, listView2, GetCurrentDesktopPath(comboBox2));
-    }
-
-    private void ListView3_ItemDrag(object? sender, ItemDragEventArgs e)
-    {
-        StartListViewItemDrag(sender, e);
-    }
-
-    private void ListView3_DragEnter(object? sender, DragEventArgs e)
-    {
-        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true || e.Data?.GetDataPresent(typeof(string[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem[])) == true || e.Data?.GetDataPresent(typeof(ListViewItem)) == true)
-        {
-            e.Effect = DragDropEffects.Move | DragDropEffects.Copy;
-        }
-        else
-        {
-            e.Effect = DragDropEffects.None;
-        }
     }
 
     private void ListView3_DragDrop(object? sender, DragEventArgs e)
     {
+        ClearDropHighlight();
         HandleDragDrop(e, listView3, GetCurrentDesktopPath(comboBox3));
+    }
+
+    private void ListView_DoubleClick(object? sender, EventArgs e)
+    {
+        if (sender is not ListView listView || listView.SelectedItems.Count == 0)
+            return;
+
+        var item = listView.SelectedItems[0];
+        try
+        {
+            if (item.Tag is FileInfo file)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = file.FullName,
+                    UseShellExecute = true
+                });
+            }
+            else if (item.Tag is DirectoryInfo dir)
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = dir.FullName,
+                    UseShellExecute = true
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Не удалось открыть: {ex.Message}",
+                "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void HandleDragDrop(DragEventArgs e, ListView targetListView, string targetPath)
     {
-        ListView? sourceListView = null;
         string[] draggedPaths = Array.Empty<string>();
-        
+
         try
         {
             if (e.Data?.GetData(DataFormats.FileDrop) is string[] fileDropPaths)
@@ -640,31 +1060,69 @@ public partial class MainForm : Form
             if (draggedPaths.Length == 0)
                 return;
 
-            sourceListView = dragSourceListView;
+            if (!Directory.Exists(targetPath))
+            {
+                MessageBox.Show($"Целевая папка не найдена: {targetPath}",
+                    "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
-            if (sourceListView == null)
+            ListView? sourceListView = dragSourceListView;
+            string? sourcePanelPath = sourceListView != null
+                ? GetDesktopPathForListView(sourceListView)
+                : null;
+
+            // Same panel — nothing to do.
+            if (sourceListView != null && sourceListView == targetListView)
                 return;
 
-            if (sourceListView == targetListView)
+            // Same folder shown in two panels, or item already in target folder.
+            if (sourcePanelPath != null && PathsEqual(sourcePanelPath, targetPath))
                 return;
 
-            string sourcePath = GetDesktopPathForListView(sourceListView);
+            bool preferCopy = (e.KeyState & 8) == 8 || (e.Effect & DragDropEffects.Copy) == DragDropEffects.Copy;
+            // External drop from Explorer: copy by default if Ctrl held, else move.
+            bool isExternal = sourceListView == null;
+            if (isExternal && (e.Effect & DragDropEffects.Move) != DragDropEffects.Move)
+                preferCopy = true;
+            if (isExternal && (e.KeyState & 8) != 8 && (e.Effect & DragDropEffects.Move) == DragDropEffects.Move)
+                preferCopy = false;
+
+            var affectedSourceDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var sourceFilePath in draggedPaths)
             {
                 if (string.IsNullOrEmpty(sourceFilePath))
                     continue;
 
-                if (!File.Exists(sourceFilePath) && !Directory.Exists(sourceFilePath))
+                bool isFile = File.Exists(sourceFilePath);
+                bool isDir = !isFile && Directory.Exists(sourceFilePath);
+                if (!isFile && !isDir)
                     continue;
 
                 string itemName = Path.GetFileName(sourceFilePath);
+                if (string.IsNullOrEmpty(itemName))
+                    continue;
+
                 string targetFilePath = Path.Combine(targetPath, itemName);
+
+                // Already at destination.
+                if (PathsEqual(sourceFilePath, targetFilePath))
+                    continue;
+
+                // Prevent moving a directory into itself or a descendant.
+                if (isDir && IsSameOrUnder(sourceFilePath, targetFilePath))
+                {
+                    MessageBox.Show(
+                        $"Нельзя переместить папку '{itemName}' внутрь самой себя.",
+                        "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
 
                 if (File.Exists(targetFilePath) || Directory.Exists(targetFilePath))
                 {
                     DialogResult result = MessageBox.Show(
-                        $"Файл '{itemName}' уже существует в целевой папке. Перезаписать?",
+                        $"'{itemName}' уже существует в целевой папке. Перезаписать?",
                         "Подтверждение",
                         MessageBoxButtons.YesNoCancel,
                         MessageBoxIcon.Warning);
@@ -675,84 +1133,68 @@ public partial class MainForm : Form
                     if (result == DialogResult.No)
                         continue;
 
-                    if (File.Exists(targetFilePath))
-                        File.Delete(targetFilePath);
-                    else if (Directory.Exists(targetFilePath))
-                        Directory.Delete(targetFilePath, true);
+                    try
+                    {
+                        if (File.Exists(targetFilePath))
+                            File.Delete(targetFilePath);
+                        else if (Directory.Exists(targetFilePath))
+                            Directory.Delete(targetFilePath, true);
+                    }
+                    catch (Exception delEx)
+                    {
+                        MessageBox.Show($"Не удалось удалить существующий элемент '{itemName}': {delEx.Message}",
+                            "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        continue;
+                    }
                 }
 
-                MoveFileOrDirectory(sourceFilePath, targetFilePath);
+                string? parentDir = Path.GetDirectoryName(sourceFilePath);
+                if (!string.IsNullOrEmpty(parentDir))
+                    affectedSourceDirs.Add(NormalizePath(parentDir));
+
+                if (preferCopy)
+                    CopyFileOrDirectory(sourceFilePath, targetFilePath);
+                else
+                    MoveFileOrDirectory(sourceFilePath, targetFilePath);
             }
 
             RefreshListViewsWithPath(targetPath);
 
-            if (sourceListView != null)
-            {
-                string sourceDesktopPath = GetDesktopPathForListView(sourceListView);
-                RefreshListViewsWithPath(sourceDesktopPath);
-            }
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            if (draggedPaths.Length > 0)
-            {
-                string sourceDesktopPath = GetDesktopPathForListView(sourceListView!);
-                try
-                {
-                    foreach (var sourceFilePath in draggedPaths)
-                    {
-                        if (string.IsNullOrEmpty(sourceFilePath))
-                            continue;
+            if (sourcePanelPath != null)
+                RefreshListViewsWithPath(sourcePanelPath);
 
-                        if (!File.Exists(sourceFilePath) && !Directory.Exists(sourceFilePath))
-                            continue;
-
-                        string itemName = Path.GetFileName(sourceFilePath);
-                        string targetFilePath = Path.Combine(targetPath, itemName);
-
-                        if (File.Exists(sourceFilePath))
-                        {
-                            File.Copy(sourceFilePath, targetFilePath, true);
-                            File.Delete(sourceFilePath);
-                        }
-                        else if (Directory.Exists(sourceFilePath))
-                        {
-                            CopyDirectory(sourceFilePath, targetFilePath);
-                            Directory.Delete(sourceFilePath, true);
-                        }
-                    }
-
-                    RefreshListViewsWithPath(targetPath);
-                    if (sourceListView != null)
-                    {
-                        RefreshListViewsWithPath(sourceDesktopPath);
-                    }
-                }
-                catch (Exception copyEx)
-                {
-                    MessageBox.Show($"Ошибка при копировании файла: {copyEx.Message}", 
-                        "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
+            // External drops: refresh any panel that shows a parent of moved items.
+            foreach (string sourceDir in affectedSourceDirs)
+                RefreshListViewsWithPath(sourceDir);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Ошибка при перемещении файла: {ex.Message}", 
+            MessageBox.Show($"Ошибка при переносе файла: {ex.Message}",
                 "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+            try
+            {
+                RefreshListViewsWithPath(targetPath);
+                if (dragSourceListView != null)
+                    RefreshListViewsWithPath(GetDesktopPathForListView(dragSourceListView));
+            }
+            catch
+            {
+                // Ignore refresh errors after a failed transfer.
+            }
         }
     }
 
-    // Вспомогательный метод для рекурсивного копирования папок
     private void CopyDirectory(string sourceDir, string targetDir)
     {
         Directory.CreateDirectory(targetDir);
-        
+
         foreach (string file in Directory.GetFiles(sourceDir))
         {
             string destFile = Path.Combine(targetDir, Path.GetFileName(file));
             File.Copy(file, destFile, true);
         }
-        
+
         foreach (string subDir in Directory.GetDirectories(sourceDir))
         {
             string destSubDir = Path.Combine(targetDir, Path.GetFileName(subDir));
@@ -760,18 +1202,64 @@ public partial class MainForm : Form
         }
     }
 
+    private void CopyFileOrDirectory(string sourcePath, string targetPath)
+    {
+        if (File.Exists(sourcePath))
+        {
+            File.Copy(sourcePath, targetPath, true);
+        }
+        else if (Directory.Exists(sourcePath))
+        {
+            CopyDirectory(sourcePath, targetPath);
+        }
+        else
+        {
+            throw new FileNotFoundException("Источник не найден", sourcePath);
+        }
+    }
+
     private void MoveFileOrDirectory(string sourcePath, string targetPath)
     {
+        if (PathsEqual(sourcePath, targetPath))
+            return;
+
+        if (Directory.Exists(sourcePath) && IsSameOrUnder(sourcePath, targetPath))
+            throw new InvalidOperationException("Нельзя переместить папку внутрь самой себя.");
+
         if (File.Exists(sourcePath))
         {
             try
             {
-                File.Move(sourcePath, targetPath);
+                File.Move(sourcePath, targetPath, overwrite: true);
             }
             catch (IOException)
             {
                 File.Copy(sourcePath, targetPath, true);
-                File.Delete(sourcePath);
+                try
+                {
+                    File.Delete(sourcePath);
+                }
+                catch (Exception deleteEx)
+                {
+                    // Leave the copy in place; surface that source was not removed.
+                    throw new IOException(
+                        $"Файл скопирован в '{targetPath}', но исходник не удалён: {deleteEx.Message}",
+                        deleteEx);
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                File.Copy(sourcePath, targetPath, true);
+                try
+                {
+                    File.Delete(sourcePath);
+                }
+                catch (Exception deleteEx)
+                {
+                    throw new IOException(
+                        $"Файл скопирован в '{targetPath}', но исходник не удалён: {deleteEx.Message}",
+                        deleteEx);
+                }
             }
         }
         else if (Directory.Exists(sourcePath))
@@ -780,10 +1268,19 @@ public partial class MainForm : Form
             {
                 Directory.Move(sourcePath, targetPath);
             }
-            catch (IOException)
+            catch (Exception)
             {
                 CopyDirectory(sourcePath, targetPath);
-                Directory.Delete(sourcePath, true);
+                try
+                {
+                    Directory.Delete(sourcePath, true);
+                }
+                catch (Exception deleteEx)
+                {
+                    throw new IOException(
+                        $"Папка скопирована в '{targetPath}', но исходник не удалён: {deleteEx.Message}",
+                        deleteEx);
+                }
             }
         }
         else
@@ -792,25 +1289,58 @@ public partial class MainForm : Form
         }
     }
 
+    private ImageList GetImageListFor(ListView listView)
+    {
+        if (listView == listView1) return imageList1;
+        if (listView == listView2) return imageList2;
+        return imageList3;
+    }
+
+    private string? GetLastPathFor(ListView listView)
+    {
+        if (listView == listView1) return lastPath1;
+        if (listView == listView2) return lastPath2;
+        return lastPath3;
+    }
+
+    private void SetLastPathFor(ListView listView, string path)
+    {
+        if (listView == listView1) lastPath1 = path;
+        else if (listView == listView2) lastPath2 = path;
+        else lastPath3 = path;
+    }
+
     private void RefreshListView(ListView listView, string folderPath)
     {
-        ImageList imageList;
-        if (listView == listView1)
-            imageList = imageList1;
-        else if (listView == listView2)
-            imageList = imageList2;
-        else
-            imageList = imageList3;
-
+        ImageList imageList = GetImageListFor(listView);
         var pathToIconIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var newItems = new List<ListViewItem>();
 
-        if (listView.Tag is Dictionary<string, int> existingTag)
+        // When switching to a different folder, drop icon cache to limit ImageList growth.
+        string? previousPath = GetLastPathFor(listView);
+        bool pathChanged = previousPath != null && !PathsEqual(previousPath, folderPath);
+        if (pathChanged)
+        {
+            imageList.Images.Clear();
+            listView.Tag = null;
+        }
+        else if (listView.Tag is Dictionary<string, int> existingTag)
         {
             foreach (var kvp in existingTag)
-            {
                 pathToIconIndex[kvp.Key] = kvp.Value;
-            }
+        }
+
+        if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
+        {
+            listView.BeginUpdate();
+            listView.Items.Clear();
+            listView.EndUpdate();
+            listView.Tag = pathToIconIndex;
+            SetLastPathFor(listView, folderPath ?? string.Empty);
+
+            Label emptyLabel = listView == listView1 ? lblCount1 : listView == listView2 ? lblCount2 : lblCount3;
+            UpdateItemCount(emptyLabel, listView, folderPath ?? string.Empty);
+            return;
         }
 
         try
@@ -846,14 +1376,9 @@ public partial class MainForm : Form
             listView.EndUpdate();
 
             listView.Tag = pathToIconIndex;
+            SetLastPathFor(listView, folderPath);
 
-            Label label;
-            if (listView == listView1)
-                label = lblCount1;
-            else if (listView == listView2)
-                label = lblCount2;
-            else
-                label = lblCount3;
+            Label label = listView == listView1 ? lblCount1 : listView == listView2 ? lblCount2 : lblCount3;
             UpdateItemCount(label, listView, folderPath);
         }
         catch (Exception ex)
@@ -863,30 +1388,16 @@ public partial class MainForm : Form
         }
     }
 
-    private void LoadDesktopFiles()
-    {
-        string desktopPath = GetCurrentDesktopPath(comboBox1);
-        RefreshListView(listView1, desktopPath);
-    }
-
-    private void LoadCommonDesktopFiles()
-    {
-        string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
-        RefreshListView(listView2, commonDesktopPath);
-    }
-
-    private void LoadThirdDesktopFiles()
-    {
-        string thirdDesktopPath = GetCurrentDesktopPath(comboBox3);
-        RefreshListView(listView3, thirdDesktopPath);
-    }
+    private void LoadDesktopFiles() => RefreshListView(listView1, GetCurrentDesktopPath(comboBox1));
+    private void LoadCommonDesktopFiles() => RefreshListView(listView2, GetCurrentDesktopPath(comboBox2));
+    private void LoadThirdDesktopFiles() => RefreshListView(listView3, GetCurrentDesktopPath(comboBox3));
 
     private ListViewItem? CreateListViewItem(FileInfo file, ImageList imageList, Dictionary<string, int> pathToIconIndex)
     {
         try
         {
             string displayName = file.Name;
-            string iconKey = file.FullName.ToLowerInvariant();
+            string iconKey = file.FullName;
 
             if (pathToIconIndex.TryGetValue(iconKey, out int existingIndex))
             {
@@ -899,28 +1410,35 @@ public partial class MainForm : Form
             }
 
             Icon? icon = null;
+            bool disposeIcon = false;
 
-            if (file.Extension.ToLower() == ".lnk")
+            if (string.Equals(file.Extension, ".lnk", StringComparison.OrdinalIgnoreCase))
             {
                 string targetPath = GetLnkTargetPath(file.FullName);
                 if (!string.IsNullOrEmpty(targetPath) && File.Exists(targetPath))
                 {
                     icon = Icon.ExtractAssociatedIcon(targetPath);
+                    disposeIcon = icon != null;
                 }
             }
 
             if (icon == null && File.Exists(file.FullName))
             {
                 icon = Icon.ExtractAssociatedIcon(file.FullName);
+                disposeIcon = icon != null;
             }
 
             if (icon == null)
             {
                 icon = SystemIcons.Application;
+                disposeIcon = false;
             }
 
             int iconIndex = imageList.Images.Count;
-            imageList.Images.Add(icon!);
+            imageList.Images.Add(icon);
+            if (disposeIcon)
+                icon.Dispose();
+
             pathToIconIndex[iconKey] = iconIndex;
 
             return new ListViewItem
@@ -941,7 +1459,7 @@ public partial class MainForm : Form
         try
         {
             string displayName = directory.Name;
-            string iconKey = directory.FullName.ToLowerInvariant();
+            string iconKey = directory.FullName;
 
             if (pathToIconIndex.TryGetValue(iconKey, out int existingIndex))
             {
@@ -953,9 +1471,15 @@ public partial class MainForm : Form
                 };
             }
 
-            Icon? icon = GetSystemIcon(directory.FullName, true) ?? SystemIcons.Application;
+            Icon? icon = GetSystemIcon(directory.FullName, true);
+            bool disposeIcon = icon != null;
+            icon ??= SystemIcons.Application;
+
             int iconIndex = imageList.Images.Count;
             imageList.Images.Add(icon);
+            if (disposeIcon)
+                icon.Dispose();
+
             pathToIconIndex[iconKey] = iconIndex;
 
             return new ListViewItem
@@ -975,22 +1499,17 @@ public partial class MainForm : Form
     {
         try
         {
-            // Используем WScript.Shell для получения целевого пути ярлыка
-            Type shellType = Type.GetTypeFromCLSID(new Guid("72C24DD5-D70A-438B-8A42-98424B88AFB8"));
+            Type? shellType = Type.GetTypeFromCLSID(new Guid("72C24DD5-D70A-438B-8A42-98424B88AFB8"));
             if (shellType == null)
-            {
                 return string.Empty;
-            }
-            
+
             object? shell = Activator.CreateInstance(shellType);
             if (shell == null)
-            {
                 return string.Empty;
-            }
-            
+
             dynamic shellObj = shell;
             var shortcut = shellObj.CreateShortcut(lnkPath);
-            string targetPath = shortcut.TargetPath;
+            string targetPath = shortcut.TargetPath ?? string.Empty;
 
             Marshal.ReleaseComObject(shortcut);
             Marshal.ReleaseComObject(shell);
@@ -1003,83 +1522,114 @@ public partial class MainForm : Form
         }
     }
 
+    private FileSystemWatcher? CreateWatcher(string path, System.Windows.Forms.Timer debounceTimer)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return null;
+
+        try
+        {
+            var watcher = new FileSystemWatcher(path)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+                IncludeSubdirectories = false,
+                EnableRaisingEvents = true
+            };
+
+            void OnFsEvent(object sender, FileSystemEventArgs e)
+            {
+                // Debounce on UI thread via timer.Restart pattern.
+                if (IsDisposed)
+                    return;
+
+                void Restart()
+                {
+                    debounceTimer.Stop();
+                    debounceTimer.Start();
+                }
+
+                if (InvokeRequired)
+                    BeginInvoke(Restart);
+                else
+                    Restart();
+            }
+
+            watcher.Created += OnFsEvent;
+            watcher.Deleted += OnFsEvent;
+            watcher.Renamed += OnFsEvent;
+            watcher.Changed += OnFsEvent;
+            return watcher;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void SafeSetWatcherPath(ref FileSystemWatcher? watcher, string path, System.Windows.Forms.Timer debounceTimer)
+    {
+        if (watcher != null)
+        {
+            try
+            {
+                watcher.EnableRaisingEvents = false;
+                watcher.Dispose();
+            }
+            catch
+            {
+                // Ignore dispose races.
+            }
+            watcher = null;
+        }
+
+        watcher = CreateWatcher(path, debounceTimer);
+    }
+
     private void InitializeFileSystemWatchers()
     {
-        // Настройка наблюдателя для личного рабочего стола
-        string desktopPath = GetCurrentDesktopPath(comboBox1);
-        desktopWatcher = new FileSystemWatcher(desktopPath);
-        desktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
-        desktopWatcher.Created += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
-        desktopWatcher.Deleted += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
-        desktopWatcher.Renamed += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
-        desktopWatcher.Changed += (s, e) => UpdateListView(listView1, GetDesktopPathForListView(listView1));
-        desktopWatcher.EnableRaisingEvents = true;
-
-        // Настройка наблюдателя для общего рабочего стола
-        string commonDesktopPath = GetCurrentDesktopPath(comboBox2);
-        commonDesktopWatcher = new FileSystemWatcher(commonDesktopPath);
-        commonDesktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
-        commonDesktopWatcher.Created += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
-        commonDesktopWatcher.Deleted += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
-        commonDesktopWatcher.Renamed += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
-        commonDesktopWatcher.Changed += (s, e) => UpdateListView(listView2, GetDesktopPathForListView(listView2));
-        commonDesktopWatcher.EnableRaisingEvents = true;
-
-        string thirdDesktopPath = GetCurrentDesktopPath(comboBox3);
-        thirdDesktopWatcher = new FileSystemWatcher(thirdDesktopPath);
-        thirdDesktopWatcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
-        thirdDesktopWatcher.Created += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
-        thirdDesktopWatcher.Deleted += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
-        thirdDesktopWatcher.Renamed += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
-        thirdDesktopWatcher.Changed += (s, e) => UpdateListView(listView3, GetDesktopPathForListView(listView3));
-        thirdDesktopWatcher.EnableRaisingEvents = true;
+        desktopWatcher = CreateWatcher(GetCurrentDesktopPath(comboBox1), refreshDebounceTimer1);
+        commonDesktopWatcher = CreateWatcher(GetCurrentDesktopPath(comboBox2), refreshDebounceTimer2);
+        thirdDesktopWatcher = CreateWatcher(GetCurrentDesktopPath(comboBox3), refreshDebounceTimer3);
     }
 
     private void PopulateUserComboBoxes()
     {
-        // Добавляем опцию "Общая папка" в три списка
         comboBox1.Items.Add("Общая папка");
         comboBox2.Items.Add("Общая папка");
         comboBox3.Items.Add("Общая папка");
 
-        // Получаем список профилей пользователей из реестра
         try
         {
-            using (RegistryKey? profileList = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"))
+            using RegistryKey? profileList = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            if (profileList != null)
             {
-                if (profileList != null)
+                foreach (string sidName in profileList.GetSubKeyNames())
                 {
-                    foreach (string sidName in profileList.GetSubKeyNames())
+                    using RegistryKey? profile = profileList.OpenSubKey(sidName);
+                    if (profile == null)
+                        continue;
+
+                    string? profilePath = profile.GetValue("ProfileImagePath") as string;
+                    if (string.IsNullOrEmpty(profilePath))
+                        continue;
+
+                    string userName = Path.GetFileName(profilePath);
+
+                    if (userName.StartsWith("systemprofile", StringComparison.OrdinalIgnoreCase) ||
+                        userName.StartsWith("LocalService", StringComparison.OrdinalIgnoreCase) ||
+                        userName.StartsWith("NetworkService", StringComparison.OrdinalIgnoreCase))
                     {
-                        using (RegistryKey? profile = profileList.OpenSubKey(sidName))
-                        {
-                            if (profile != null)
-                            {
-                                string? profilePath = profile.GetValue("ProfileImagePath") as string;
-                                if (!string.IsNullOrEmpty(profilePath))
-                                {
-                                    string userName = Path.GetFileName(profilePath);
+                        continue;
+                    }
 
-                                    // Пропускаем системные профили
-                                    if (!userName.StartsWith("systemprofile") &&
-                                        !userName.StartsWith("LocalService") &&
-                                        !userName.StartsWith("NetworkService"))
-                                    {
-                                        // Проверяем перенаправление Desktop через User Shell Folders
-                                        string desktopPath = GetUserDesktopPath(sidName, profilePath);
+                    string desktopPath = GetUserDesktopPath(sidName, profilePath);
 
-                                        // Проверяем существование папки Desktop
-                                        if (Directory.Exists(desktopPath))
-                                        {
-                                            var userItem = new UserProfileItem(userName, desktopPath);
-                                            comboBox1.Items.Add(userItem);
-                                            comboBox2.Items.Add(userItem);
-                                            comboBox3.Items.Add(userItem);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    if (Directory.Exists(desktopPath))
+                    {
+                        var userItem = new UserProfileItem(userName, desktopPath);
+                        comboBox1.Items.Add(userItem);
+                        comboBox2.Items.Add(userItem);
+                        comboBox3.Items.Add(userItem);
                     }
                 }
             }
@@ -1090,12 +1640,12 @@ public partial class MainForm : Form
                 "IconShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
-        // Устанавливаем текущего пользователя для первой панели
         string currentUser = Environment.UserName;
         int currentUserIndex = -1;
         for (int i = 0; i < comboBox1.Items.Count; i++)
         {
-            if (comboBox1.Items[i] is UserProfileItem item && item.UserName == currentUser)
+            if (comboBox1.Items[i] is UserProfileItem item &&
+                string.Equals(item.UserName, currentUser, StringComparison.OrdinalIgnoreCase))
             {
                 currentUserIndex = i;
                 break;
@@ -1120,37 +1670,27 @@ public partial class MainForm : Form
     {
         try
         {
-            // Пытаемся прочитать перенаправленный путь из User Shell Folders для конкретного SID
-            using (RegistryKey? userKey = Registry.Users.OpenSubKey($"{sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"))
+            using RegistryKey? userKey = Registry.Users.OpenSubKey($"{sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders");
+            if (userKey != null)
             {
-                if (userKey != null)
+                string? desktopPath = userKey.GetValue("Desktop") as string;
+                if (!string.IsNullOrEmpty(desktopPath))
                 {
-                    string? desktopPath = userKey.GetValue("Desktop") as string;
-                    if (!string.IsNullOrEmpty(desktopPath))
-                    {
-                        // Разворачиваем переменные окружения
-                        desktopPath = Environment.ExpandEnvironmentVariables(desktopPath);
-                        if (Directory.Exists(desktopPath))
-                        {
-                            return desktopPath;
-                        }
-                    }
+                    desktopPath = Environment.ExpandEnvironmentVariables(desktopPath);
+                    if (Directory.Exists(desktopPath))
+                        return desktopPath;
                 }
             }
         }
         catch
         {
-            // Игнорируем ошибки доступа к реестру других пользователей
+            // Ignore access errors for other users' registry hives.
         }
 
-        // Проверяем стандартный путь
         string standardPath = Path.Combine(profilePath, "Desktop");
         if (Directory.Exists(standardPath))
-        {
             return standardPath;
-        }
 
-        // Проверяем альтернативные пути на других дисках
         string userName = Path.GetFileName(profilePath);
         string[] driveLetters = { "D", "E", "F" };
 
@@ -1158,9 +1698,7 @@ public partial class MainForm : Form
         {
             string altPath = Path.Combine($"{drive}:\\Users", userName, "Desktop");
             if (Directory.Exists(altPath))
-            {
                 return altPath;
-            }
         }
 
         return standardPath;
@@ -1168,76 +1706,42 @@ public partial class MainForm : Form
 
     private void ComboBox1_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        if (comboBox1.SelectedItem == null) return;
+        if (suppressComboLoad || comboBox1.SelectedItem == null)
+            return;
 
         string selectedPath = GetCurrentDesktopPath(comboBox1);
-
-        // Обновляем FileSystemWatcher только если он уже инициализирован
-        if (desktopWatcher != null)
-        {
-            desktopWatcher.EnableRaisingEvents = false;
-            desktopWatcher.Path = selectedPath;
-            desktopWatcher.EnableRaisingEvents = true;
-        }
-
-        // Обновляем ListView
+        SafeSetWatcherPath(ref desktopWatcher, selectedPath, refreshDebounceTimer1);
         RefreshListView(listView1, selectedPath);
-        UpdateItemCount(lblCount1, listView1, selectedPath);
     }
 
     private void ComboBox2_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        if (comboBox2.SelectedItem == null) return;
+        if (suppressComboLoad || comboBox2.SelectedItem == null)
+            return;
 
         string selectedPath = GetCurrentDesktopPath(comboBox2);
-
-        // Обновляем FileSystemWatcher только если он уже инициализирован
-        if (commonDesktopWatcher != null)
-        {
-            commonDesktopWatcher.EnableRaisingEvents = false;
-            commonDesktopWatcher.Path = selectedPath;
-            commonDesktopWatcher.EnableRaisingEvents = true;
-        }
-
-        // Обновляем ListView
+        SafeSetWatcherPath(ref commonDesktopWatcher, selectedPath, refreshDebounceTimer2);
         RefreshListView(listView2, selectedPath);
-        UpdateItemCount(lblCount2, listView2, selectedPath);
     }
 
     private void ComboBox3_SelectedIndexChanged(object? sender, EventArgs e)
     {
-        if (comboBox3.SelectedItem == null) return;
+        if (suppressComboLoad || comboBox3.SelectedItem == null)
+            return;
 
         string selectedPath = GetCurrentDesktopPath(comboBox3);
-
-        if (thirdDesktopWatcher != null)
-        {
-            thirdDesktopWatcher.EnableRaisingEvents = false;
-            thirdDesktopWatcher.Path = selectedPath;
-            thirdDesktopWatcher.EnableRaisingEvents = true;
-        }
-
+        SafeSetWatcherPath(ref thirdDesktopWatcher, selectedPath, refreshDebounceTimer3);
         RefreshListView(listView3, selectedPath);
-        UpdateItemCount(lblCount3, listView3, selectedPath);
     }
 
-    private void BtnOpenFolder1_Click(object? sender, EventArgs e)
-    {
-        string folderPath = GetCurrentDesktopPath(comboBox1);
-        OpenFolderInExplorer(folderPath);
-    }
+    private void BtnOpenFolder1_Click(object? sender, EventArgs e) =>
+        OpenFolderInExplorer(GetCurrentDesktopPath(comboBox1));
 
-    private void BtnOpenFolder2_Click(object? sender, EventArgs e)
-    {
-        string folderPath = GetCurrentDesktopPath(comboBox2);
-        OpenFolderInExplorer(folderPath);
-    }
+    private void BtnOpenFolder2_Click(object? sender, EventArgs e) =>
+        OpenFolderInExplorer(GetCurrentDesktopPath(comboBox2));
 
-    private void BtnOpenFolder3_Click(object? sender, EventArgs e)
-    {
-        string folderPath = GetCurrentDesktopPath(comboBox3);
-        OpenFolderInExplorer(folderPath);
-    }
+    private void BtnOpenFolder3_Click(object? sender, EventArgs e) =>
+        OpenFolderInExplorer(GetCurrentDesktopPath(comboBox3));
 
     private void OpenFolderInExplorer(string folderPath)
     {
@@ -1245,7 +1749,12 @@ public partial class MainForm : Form
         {
             if (Directory.Exists(folderPath))
             {
-                System.Diagnostics.Process.Start("explorer.exe", folderPath);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = folderPath,
+                    UseShellExecute = true
+                });
             }
             else
             {
@@ -1264,13 +1773,9 @@ public partial class MainForm : Form
     {
         int count = listView.Items.Count;
         if (!string.IsNullOrEmpty(folderPath))
-        {
             label.Text = $"Элементов: {count}  |  {folderPath}";
-        }
         else
-        {
             label.Text = $"Элементов: {count}";
-        }
     }
 
     private string GetCurrentDesktopPath(ComboBox comboBox)
@@ -1278,14 +1783,11 @@ public partial class MainForm : Form
         if (comboBox.SelectedItem == null)
             return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
 
-        if (comboBox.SelectedItem is string && comboBox.SelectedItem.ToString() == "Общая папка")
-        {
+        if (comboBox.SelectedItem is string s && s == "Общая папка")
             return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
-        }
-        else if (comboBox.SelectedItem is UserProfileItem item)
-        {
+
+        if (comboBox.SelectedItem is UserProfileItem item)
             return item.DesktopPath;
-        }
 
         return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
     }
@@ -1301,7 +1803,7 @@ public partial class MainForm : Form
         return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
     }
 
-    private class UserProfileItem
+    private sealed class UserProfileItem
     {
         public string UserName { get; }
         public string DesktopPath { get; }
@@ -1312,45 +1814,79 @@ public partial class MainForm : Form
             DesktopPath = desktopPath;
         }
 
-        public override string ToString()
-        {
-            return UserName;
-        }
-    }
-
-    private void UpdateListView(ListView listView, string folderPath)
-    {
-        // Проверяем, нужно ли вызвать метод в UI-потоке
-        if (listView.InvokeRequired)
-        {
-            listView.Invoke(new Action(() => RefreshListView(listView, folderPath)));
-        }
-        else
-        {
-            RefreshListView(listView, folderPath);
-        }
+        public override string ToString() => UserName;
     }
 
     private void RefreshListViewsWithPath(string folderPath)
     {
-        if (GetDesktopPathForListView(listView1) == folderPath)
-            RefreshListView(listView1, folderPath);
+        if (string.IsNullOrEmpty(folderPath))
+            return;
 
-        if (GetDesktopPathForListView(listView2) == folderPath)
-            RefreshListView(listView2, folderPath);
+        if (PathsEqual(GetDesktopPathForListView(listView1), folderPath))
+            RefreshListView(listView1, GetDesktopPathForListView(listView1));
 
-        if (GetDesktopPathForListView(listView3) == folderPath)
-            RefreshListView(listView3, folderPath);
+        if (PathsEqual(GetDesktopPathForListView(listView2), folderPath))
+            RefreshListView(listView2, GetDesktopPathForListView(listView2));
+
+        if (PathsEqual(GetDesktopPathForListView(listView3), folderPath))
+            RefreshListView(listView3, GetDesktopPathForListView(listView3));
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            desktopWatcher?.Dispose();
-            commonDesktopWatcher?.Dispose();
-            thirdDesktopWatcher?.Dispose();
+            try { desktopWatcher?.Dispose(); } catch { /* ignore */ }
+            try { commonDesktopWatcher?.Dispose(); } catch { /* ignore */ }
+            try { thirdDesktopWatcher?.Dispose(); } catch { /* ignore */ }
+
+            EndDragOverlay();
+            ClearDropHighlight();
+
+            dragOverlayTimer?.Stop();
+            dragOverlayTimer?.Dispose();
+            refreshDebounceTimer1?.Stop();
+            refreshDebounceTimer1?.Dispose();
+            refreshDebounceTimer2?.Stop();
+            refreshDebounceTimer2?.Dispose();
+            refreshDebounceTimer3?.Stop();
+            refreshDebounceTimer3?.Dispose();
+
+            imageList1?.Dispose();
+            imageList2?.Dispose();
+            imageList3?.Dispose();
         }
+
         base.Dispose(disposing);
+    }
+
+    private static void FillRoundedRectangle(Graphics g, Brush brush, Rectangle bounds, int radius)
+    {
+        using var path = CreateRoundedRect(bounds, radius);
+        g.FillPath(brush, path);
+    }
+
+    private static void DrawRoundedRectangle(Graphics g, Pen pen, Rectangle bounds, int radius)
+    {
+        using var path = CreateRoundedRect(bounds, radius);
+        g.DrawPath(pen, path);
+    }
+
+    private static System.Drawing.Drawing2D.GraphicsPath CreateRoundedRect(Rectangle bounds, int radius)
+    {
+        int d = Math.Max(0, radius) * 2;
+        var path = new System.Drawing.Drawing2D.GraphicsPath();
+        if (radius <= 0 || d > bounds.Width || d > bounds.Height)
+        {
+            path.AddRectangle(bounds);
+            return path;
+        }
+
+        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 }
